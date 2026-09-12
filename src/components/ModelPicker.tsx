@@ -59,6 +59,14 @@ export default function ModelPicker(props: {
   // 全列进 /models，它们打不通 /chat/completions，混在列表里纯属噪音
   const [chatOnly, setChatOnly] = React.useState(true);
   const [limit, setLimit] = React.useState(PAGE);
+  /**
+   * 弹层往上还是往下开、最高多少。
+   *
+   * 固定往上开会出事：新对话时输入框是垂直居中的，上方空间可能还没弹层高，
+   * 顶部（凭据区和搜索框）就被窗口边缘裁掉，而且没有任何滚动条提示 ——
+   * 用户只会觉得「模型列表怎么看不全」。所以开的时候量一下再决定。
+   */
+  const [place, setPlace] = React.useState<{ up: boolean; maxH: number }>({ up: true, maxH: 520 });
   const anchorRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
@@ -82,6 +90,27 @@ export default function ModelPicker(props: {
 
   // 换搜索词就回到第一页，否则翻到第 5 页再搜会看到莫名其妙的一大串
   React.useEffect(() => setLimit(PAGE), [q]);
+
+  React.useLayoutEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const r = anchorRef.current?.getBoundingClientRect();
+      if (!r) return;
+      const GAP = 16;
+      const above = r.top - GAP;
+      const below = window.innerHeight - r.bottom - GAP;
+      // 哪边空间大往哪边开；两边都不够时也至少给列表留出能滚动的高度
+      const up = above >= below;
+      setPlace({ up, maxH: Math.max(220, Math.min(560, up ? above : below)) });
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    return () => {
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+    };
+  }, [open]);
 
   const { good: healthyModels, bad } = React.useMemo(
     () => partitionModels(props.models, props.health, props.profileId),
@@ -207,7 +236,7 @@ export default function ModelPicker(props: {
       </button>
 
       {open ? (
-        <div className="popup picker">
+        <div className={`popup picker${place.up ? '' : ' down'}`} style={{ maxHeight: place.maxH }}>
           {/* 凭据 */}
           <div className="picker-section">
             <div className="picker-label">

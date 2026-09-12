@@ -7,6 +7,7 @@ const { extractErrorMessage } = require('./sse.cjs');
 const { runTool } = require('./tools/index.cjs');
 const remote = require('./remote-server.cjs');
 const chromeLaunch = require('./chrome-launch.cjs');
+const skillFolder = require('./skill-folder.cjs');
 const attachments = require('./attachments.cjs');
 
 const DEV_URL = process.env.SNC_DEV_URL || '';
@@ -276,6 +277,12 @@ function registerIpc() {
       return { ok: false, error: e.message };
     }
   });
+
+  // 技能文件夹同步。刻意只走 IPC，不进 registry ——
+  // 那个目录在工作目录白名单之外，做成模型工具等于给它一条绕过白名单的路。
+  ipcMain.handle('snc:skillsRead', (_e, dir) => skillFolder.read(dir));
+  ipcMain.handle('snc:skillsWrite', (_e, { dir, items }) => skillFolder.write(dir, items));
+  ipcMain.handle('snc:skillsDefaultDir', () => skillFolder.defaultDir());
 
   // Chrome：起一个带调试端口的实例
   ipcMain.handle('snc:chromeLaunch', (_e, { port, path: p }) => chromeLaunch.launch(port, p));

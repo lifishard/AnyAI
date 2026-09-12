@@ -35,6 +35,17 @@ export interface Skill {
   installedHash?: string;
 }
 
+/**
+ * 正文归一化。
+ *
+ * 指纹必须建立在同一种表示上，否则会出这种事：安装时按原文算、同步时按
+ * 归一化后算 —— 同一份内容两个指纹，于是每次同步都以为「我方改过了」。
+ * 所以凡是要比对的地方，一律先过这里。
+ */
+export function normalizeBody(s: string): string {
+  return s.replace(/\r\n/g, '\n').trim();
+}
+
 /** 极简 FNV-1a。只用来判断「正文变没变过」，不需要抗碰撞 */
 export function bodyHash(s: string): string {
   let h = 0x811c9dc5;
@@ -60,11 +71,13 @@ export function slugify(name: string): string {
 export function parseSkillMd(md: string, fallbackName = ''): Omit<Skill, 'id' | 'installedAt' | 'uses' | 'enabled' | 'source'> {
   let name = fallbackName;
   let description = '';
-  let body = md;
+  let body = normalizeBody(md);
 
   const fm = md.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
   if (fm) {
-    body = fm[2];
+    // frontmatter 后面那个空行属于格式不属于内容。不去掉的话每次
+    // 「解析 → 序列化 → 再解析」都会多攒一个换行
+    body = normalizeBody(fm[2]);
     // 只挑我们认识的两个字段，不引 YAML 库 —— frontmatter 里花活再多也不关我们的事
     for (const line of fm[1].split('\n')) {
       const m = line.match(/^(name|description)\s*:\s*(.*)$/i);
@@ -332,7 +345,7 @@ export async function installFromGithub(
         makeSkill({
           ...parsed,
           source: `github:${t.owner}/${t.repo}/${p}`,
-          installedHash: bodyHash(parsed.body),
+          installedHash: bodyHash(parsed.body), // parsed.body 已经归一化过
         }),
       );
       onProgress?.(`找到 ${parsed.name}（${Math.round(md.length / 1024)} KB）`);
@@ -370,35 +383,38 @@ export async function installFromGithub(
     trace.trees++;
     try {
       /*
-       * 先拿**非递归**的一层。
+       * 递归拉整棵子树，一次调用拿到所有层。
        *
-       * 上一版用了 ?recursive=1，结果 skills/ 下面每个技能目录里的 references/、
-       * scripts/ 全被列了出来，几百个条目把返回值撑爆，被截断成前 5 个技能 ——
-       * JSON 仍然合法，所以一路静默走到底。能解析不等于完整。
+       * 这里前后栽过两跟头，记下来免得再犯：
        *
-       * 一层就够了：skills/<名字>/SKILL.md 是标准布局，拿到 <名字> 之后
-       * 直接去 CDN 取文件，不花 API 额度。
+       *   1. 一开始用 recursive=1 但没动返回值上限，40000 字符把树截断了，
+       *      只剩字母序前几个技能 —— JSON 合法所以一路静默。
+       *   2. 于是改成非递归只看一层。truncation 是没了，但
+       *      skills/<分类>/<名字>/SKILL.md 这种多一层的布局直接一个都找不到。
+       *
+       * 正解是两样都要：递归 + 把上限开到足够大（max_chars 就是为此加的）。
+       * 真被 GitHub 自己截断了（超过 10 万条目）会如实报出来，不再装作没事。
        */
       const r = (await ghJson(
-        `/repos/${t.owner}/${t.repo}/git/trees/${sha}`,
+        `/repos/${t.owner}/${t.repo}/git/trees/${sha}?recursive=1`,
         toolCtx,
-        500000,
+        1000000,
       )) as GhTree;
       const items = Array.isArray(r?.tree) ? r.tree : [];
 
       if (r?.truncated || r?._truncated) {
-        // 真发生了就必须说出来，不能像上次那样悄悄少装
-        hardErrors.push(`${dirPath} 的目录树太大被截断了，可能漏掉一部分技能`);
+        hardErrors.push(
+          `${dirPath} 的目录树太大被截断了，可能漏掉一部分技能 —— ` +
+            '把地址直接指到某个子目录再装一次',
+        );
       }
 
-      const out: string[] = [];
-      for (const e of items) {
-        if (e.type === 'blob' && /^SKILL\.md$/i.test(e.path)) out.push(`${dirPath}/${e.path}`);
-        // 子目录：直接按标准布局猜一个 SKILL.md，取文件走 CDN 不花额度，
-        // 猜错了就是一次 404，比多花一次 API 去列目录划算
-        else if (e.type === 'tree') out.push(`${dirPath}/${e.path}/SKILL.md`);
-      }
-      return out;
+      return items
+        .filter((e) => e.type === 'blob' && /(^|\/)SKILL\.md$/i.test(e.path))
+        // 深度放到 4：skills/<分类>/<名字>/SKILL.md 是真实存在的布局（mattpocock/skills），
+        // 再深就不像技能仓库而像是把整个 monorepo 爬进来了
+        .filter((e) => e.path.split('/').length <= 4)
+        .map((e) => `${dirPath}/${e.path}`);
     } catch (e) {
       if (!isNotFound(e)) {
         hardErrors.push(`读取 ${dirPath} 的目录树：${e instanceof Error ? e.message : String(e)}`);
@@ -451,7 +467,7 @@ export async function installFromGithub(
     if (found.length >= MAX_SKILLS) break;
     if (!d.sha) continue;
     const paths = await skillPathsInTree(d.path, d.sha);
-    for (const p of paths.slice(0, 80)) await tryFile(p);
+    for (const p of paths.slice(0, 120)) await tryFile(p);
   }
 
   // 6. 仓库根的隐藏目录（.claude/skills 这类不会出现在普通列目录里的组合路径）
@@ -495,13 +511,18 @@ export async function installFromGithub(
       );
     }
     const mdNames = mdFilesIn(entries).map((f) => f.name);
+    const dirNames = dirs.map((d) => d.name);
     throw new Error(
-      `在 ${t.owner}/${t.repo}${t.path ? `/${t.path}` : ''} 里没找到技能文件。` +
+      `在 ${t.owner}/${t.repo}${t.path ? `/${t.path}` : ''} 里没找到技能文件。\n` +
         (mdNames.length
-          ? `\n这个路径下有这些 md：${mdNames.slice(0, 8).join('、')} —— 但它们都没有 ` +
-            'YAML frontmatter（开头的 --- 块里要有 name 或 description），所以不像技能。' +
-            '\n可以把地址直接指到某个具体的 .md 文件强制安装。'
-          : '\n这个路径下一个 md 文件都没有。确认路径，或者指到具体的技能目录。'),
+          ? `根目录的这些 md 没有 YAML frontmatter（开头的 --- 块里要有 name 或 description），` +
+            `所以不当成技能：${mdNames.slice(0, 8).join('、')}。\n`
+          : '') +
+        (dirNames.length
+          ? `扫过的子目录：${dirNames.slice(0, 8).join('、')}。如果技能藏得更深，` +
+            '把地址直接指到那一层，例如 owner/repo/tree/main/skills/engineering。\n'
+          : '') +
+        '也可以把地址指到某个具体的 .md 文件 —— 那种情况不检查 frontmatter，直接装。',
     );
   }
   return found;

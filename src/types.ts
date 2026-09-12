@@ -248,6 +248,15 @@ export interface AppSettings {
   modelHealth: ModelHealthMap;
   /** 请求失败后自动重试的次数上限（限流和 5xx 才重试），0 = 关掉 */
   autoRetry: number;
+  /** 技能与本地文件夹的双向同步 */
+  skillSync: SkillSyncConfig;
+}
+
+export interface SkillSyncConfig {
+  /** 空 = 没配，功能不启用。默认建议 ~/.claude/skills */
+  dir: string;
+  /** 启动时自动同步一次 */
+  auto: boolean;
 }
 
 /* ---------------- 传输层协议 ---------------- */

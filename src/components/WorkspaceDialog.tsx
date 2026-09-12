@@ -18,6 +18,9 @@ import {
   type ScheduledTask,
 } from '../lib/schedule';
 import { uid } from '../lib/store';
+import { applyPlan, describeSync, planSync } from '../lib/skillsync';
+import { desktop } from '../lib/transport';
+import type { SkillSyncConfig } from '../types';
 import { Field, Modal, Segmented, Switch } from './ui';
 
 type Tab = 'projects' | 'skills' | 'tasks';
@@ -269,10 +272,140 @@ function ProjectsTab(props: {
  * 技能
  * ================================================================== */
 
+
+/* ------------------------------------------------------------------ *
+ * 与本地文件夹双向同步
+ *
+ * 目标是跟 Claude Code / Desktop 共用同一批技能 —— 它们读的就是
+ * ~/.claude/skills/<名字>/SKILL.md。
+ * ------------------------------------------------------------------ */
+
+function FolderSync(props: {
+  skills: Skill[];
+  onChange: (s: Skill[]) => void;
+  cfg: SkillSyncConfig;
+  onCfg: (c: SkillSyncConfig) => void;
+}) {
+  const bridge = desktop();
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg] = React.useState<string | null>(null);
+
+  if (!bridge) {
+    return (
+      <div className="hint" style={{ marginTop: 8 }}>
+        文件夹同步只在桌面端可用（手机端没有本地文件系统）。
+      </div>
+    );
+  }
+
+  const useDefault = async () => {
+    const d = await bridge.skillsDefaultDir();
+    props.onCfg({ ...props.cfg, dir: d });
+    setMsg(`已填入 ${d}`);
+  };
+
+  const run = async () => {
+    const dir = props.cfg.dir.trim();
+    if (!dir) {
+      setMsg('先填一个目录');
+      return;
+    }
+    setBusy(true);
+    setMsg('扫描目录…');
+    try {
+      const r = await bridge.skillsRead(dir);
+      if (!r.ok) {
+        setMsg(`✗ 读取失败：${r.error ?? '未知原因'}`);
+        return;
+      }
+
+      const plan = planSync(props.skills, r.items);
+
+      if (plan.push.length) {
+        setMsg(`写出 ${plan.push.length} 个…`);
+        const w = await bridge.skillsWrite(dir, plan.push);
+        if (!w.ok) {
+          setMsg(`✗ 写入失败：${w.error ?? '未知原因'}`);
+          return;
+        }
+        if (w.failed.length) {
+          setMsg(
+            `部分写入失败：${w.failed
+              .slice(0, 3)
+              .map((f) => `${f.name}（${f.error}）`)
+              .join('、')}`,
+          );
+        }
+      }
+
+      props.onChange(applyPlan(props.skills, plan));
+      setMsg(describeSync(plan, r.dir ?? dir));
+    } catch (e) {
+      setMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="field" style={{ marginTop: 14 }}>
+      <div className="field-label">与本地文件夹双向同步</div>
+      <div className="row" style={{ gap: 6 }}>
+        <input
+          type="text"
+          style={{ flex: 1 }}
+          placeholder="例如 C:\Users\你\.claude\skills"
+          value={props.cfg.dir}
+          onChange={(e) => props.onCfg({ ...props.cfg, dir: e.target.value })}
+        />
+        <button className="btn sm" onClick={() => void useDefault()}>
+          用默认
+        </button>
+        <button className="btn sm primary" onClick={() => void run()} disabled={busy}>
+          {busy ? '同步中…' : '同步'}
+        </button>
+        {props.cfg.dir ? (
+          <button className="btn sm" onClick={() => void bridge.revealPath(props.cfg.dir)}>
+            打开
+          </button>
+        ) : null}
+      </div>
+
+      <div className="row" style={{ marginTop: 6, alignItems: 'center', gap: 8 }}>
+        <Switch
+          checked={props.cfg.auto}
+          onChange={(v) => props.onCfg({ ...props.cfg, auto: v })}
+          label="启动时自动同步一次"
+        />
+      </div>
+
+      {msg ? (
+        <div
+          className="hint"
+          style={{ marginTop: 6, whiteSpace: 'pre-wrap', color: msg.startsWith('✗') ? 'var(--danger)' : undefined }}
+        >
+          {msg}
+        </div>
+      ) : null}
+
+      <div className="hint" style={{ marginTop: 6, lineHeight: 1.85 }}>
+        Claude Code 和 Claude Desktop 读的就是 <code>~/.claude/skills/&lt;名字&gt;/SKILL.md</code>，
+        指到那里就能跟它们共用同一批技能。
+        <br />
+        <b>只新增和更新，永不删除任何一边。</b> 两边都改过的会各留一份
+        （进来的那份叫 <code>&lt;名字&gt;-来自文件夹</code>），不猜谁更该保留 ——
+        按时间戳挑新的那种做法，迟早会悄悄吃掉你半小时的修改。
+      </div>
+    </div>
+  );
+}
+
 function SkillsTab(props: {
   skills: Skill[];
   onChange: (s: Skill[]) => void;
   toolCtx: ToolContext;
+  sync: SkillSyncConfig;
+  onSync: (c: SkillSyncConfig) => void;
 }) {
   const [ghInput, setGhInput] = React.useState('');
   const [installing, setInstalling] = React.useState(false);
@@ -355,6 +488,13 @@ function SkillsTab(props: {
           </div>
         )}
       </div>
+
+      <FolderSync
+        skills={props.skills}
+        onChange={props.onChange}
+        cfg={props.sync}
+        onCfg={props.onSync}
+      />
 
       <div className="row" style={{ margin: '12px 0' }}>
         <button
@@ -703,6 +843,8 @@ export default function WorkspaceDialog(props: {
   profiles: KeyProfile[];
   models: ModelInfo[];
   toolCtx: ToolContext;
+  skillSync: SkillSyncConfig;
+  onSkillSync: (c: SkillSyncConfig) => void;
 }) {
   const tab = (['projects', 'skills', 'tasks'] as Tab[]).includes(props.tab as Tab)
     ? (props.tab as Tab)
@@ -727,7 +869,13 @@ export default function WorkspaceDialog(props: {
           />
         ) : null}
         {tab === 'skills' ? (
-          <SkillsTab skills={props.skills} onChange={props.onSkills} toolCtx={props.toolCtx} />
+          <SkillsTab
+            skills={props.skills}
+            onChange={props.onSkills}
+            toolCtx={props.toolCtx}
+            sync={props.skillSync}
+            onSync={props.onSkillSync}
+          />
         ) : null}
         {tab === 'tasks' ? (
           <TasksTab

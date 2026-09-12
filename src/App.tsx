@@ -42,6 +42,7 @@ import { desktop, getTransport, platformLabel, setRemoteConfig } from './lib/tra
 import type { EffortLevel } from './lib/effort';
 import { loadSkills, saveSkills, skillSystemBlock, type Skill } from './lib/skills';
 import { collectArtifacts } from './lib/artifacts';
+import { applyPlan, describeSync, planSync } from './lib/skillsync';
 import { loadProjects, projectSystemBlock, saveProjects, type Project } from './lib/projects';
 import {
   dueTasks,
@@ -181,6 +182,34 @@ export default function App() {
     void saveSkills(skills);
     void saveTasks(tasks);
   }, [projects, skills, tasks]);
+
+  /* ---------------- 启动时自动同步技能文件夹 ---------------- */
+
+  const syncedOnceRef = React.useRef(false);
+  React.useEffect(() => {
+    if (syncedOnceRef.current) return;
+    if (!settings?.skillSync?.auto || !settings.skillSync.dir) return;
+    const bridge = desktop();
+    if (!bridge) return;
+    syncedOnceRef.current = true;
+
+    void (async () => {
+      try {
+        const r = await bridge.skillsRead(settings.skillSync.dir);
+        if (!r.ok) return;
+        const plan = planSync(skills, r.items);
+        if (!plan.push.length && !plan.pull.length && !plan.conflicts.length) return;
+        if (plan.push.length) await bridge.skillsWrite(settings.skillSync.dir, plan.push);
+        setSkills((prev) => applyPlan(prev, plan));
+        toast.show(describeSync(plan, r.dir ?? settings.skillSync.dir).split('\n')[0], 5000);
+      } catch {
+        // 自动同步失败就安静收场 —— 启动时弹一个红条没意义，
+        // 用户在工作区里手动点一次会看到真正的报错
+      }
+    })();
+    // skills 只在首次挂载时取一次，不跟它联动：否则同步写回 skills 会触发自己
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings?.skillSync?.auto, settings?.skillSync?.dir]);
 
   /* ---------------- 快捷键 ---------------- */
 
@@ -1273,6 +1302,8 @@ export default function App() {
           profiles={settings.keyProfiles}
           models={models}
           toolCtx={toolContextOf(settings, active?.projectId ?? null)}
+          skillSync={settings.skillSync ?? { dir: '', auto: false }}
+          onSkillSync={(c) => setSettings((p) => (p ? { ...p, skillSync: c } : p))}
         />
         </ErrorBoundary>
       ) : null}

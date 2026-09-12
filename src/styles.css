@@ -1671,6 +1671,9 @@ input[type='range'] {
   left: 0;
   z-index: 30;
   min-width: 240px;
+  /* 兜底：任何弹层都不该长过视口。模型选择器会用算好的精确高度覆盖掉它 */
+  max-height: calc(100vh - 32px);
+  overflow: auto;
   background: var(--bg-elev);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
@@ -2619,4 +2622,27 @@ kbd {
   border-radius: 999px;
   background: var(--bg, #fff);
   border: 1px solid var(--border);
+}
+
+/* ---------------- 弹层高度自适应 ----------------
+ * 弹层自己不滚动（滚整块会把搜索框也卷走），只让内部的列表滚。
+ * 高度由组件按可用空间算好之后以 inline style 传进来。
+ */
+.popup.picker {
+  overflow: hidden;
+}
+/* 往下开的时候贴在按钮下沿 */
+.popup.down {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+/* 模型那一节要能被压缩，列表自己滚 */
+.popup.picker > .picker-section:last-child {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.popup.picker .picker-list {
+  flex: 1 1 auto;
+  min-height: 88px;
 }

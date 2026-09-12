@@ -51,6 +51,7 @@ export function defaultSettings(): AppSettings {
     effortMappings: defaultEffortMappings(),
     modelHealth: {},
     autoRetry: 2,
+    skillSync: { dir: '', auto: false },
   };
 }
 
@@ -93,6 +94,7 @@ export async function loadSettings(): Promise<AppSettings> {
     merged.cachedModels = parsed.cachedModels ?? {};
     merged.tools = { ...defaultToolConfig(), ...(parsed.tools ?? {}) };
     merged.remote = { enabled: false, url: '', token: '', ...(parsed.remote ?? {}) };
+    merged.skillSync = { dir: '', auto: false, ...(parsed.skillSync ?? {}) };
     merged.effortMappings = parsed.effortMappings?.length
       ? parsed.effortMappings
       : defaultEffortMappings();

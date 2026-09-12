@@ -36,6 +36,10 @@ contextBridge.exposeInMainWorld('snc', {
   openPath: (p) => ipcRenderer.invoke('snc:openPath', p),
   readArtifact: (p, maxBytes) => ipcRenderer.invoke('snc:readArtifact', { path: p, maxBytes }),
 
+  skillsRead: (dir) => ipcRenderer.invoke('snc:skillsRead', dir),
+  skillsWrite: (dir, items) => ipcRenderer.invoke('snc:skillsWrite', { dir, items }),
+  skillsDefaultDir: () => ipcRenderer.invoke('snc:skillsDefaultDir'),
+
   chromeLaunch: (port, path) => ipcRenderer.invoke('snc:chromeLaunch', { port, path }),
   chromeStatus: (port) => ipcRenderer.invoke('snc:chromeStatus', port),
 

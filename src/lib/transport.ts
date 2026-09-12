@@ -60,11 +60,31 @@ interface ElectronBridge {
     p: string,
     maxBytes?: number,
   ): Promise<{ ok: boolean; text?: string; size?: number; error?: string }>;
+  skillsRead(dir: string): Promise<SkillFolderRead>;
+  skillsWrite(dir: string, items: { name: string; md: string }[]): Promise<SkillFolderWrite>;
+  skillsDefaultDir(): Promise<string>;
   chromeLaunch(port: number, path?: string): Promise<ChromeLaunchResult>;
   chromeStatus(port: number): Promise<ChromeStatus>;
   remoteStart(port: number, token: string): Promise<RemoteStatus>;
   remoteStop(): Promise<RemoteStatus>;
   remoteStatus(): Promise<RemoteStatus>;
+}
+
+/** 技能目录扫描结果 */
+export interface SkillFolderRead {
+  ok: boolean;
+  dir?: string;
+  exists?: boolean;
+  items: { name: string; md: string; mtimeMs: number; path: string }[];
+  error?: string;
+}
+
+export interface SkillFolderWrite {
+  ok: boolean;
+  dir?: string;
+  written: string[];
+  failed: { name: string; error: string }[];
+  error?: string;
 }
 
 /** 主进程读回来的一个附件候选 */
