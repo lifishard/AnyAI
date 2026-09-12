@@ -30,6 +30,8 @@ interface NativeEvent {
   requestId: string;
   type: 'chunk' | 'body' | 'done' | 'error';
   data?: unknown;
+  /** type === 'error' 时的上游 HTTP 状态码 */
+  status?: number;
 }
 
 interface ElectronBridge {
@@ -241,7 +243,7 @@ class ElectronTransport implements Transport {
             if (settled) return;
             settled = true;
             off();
-            h.onError(String(e.data ?? '未知错误'));
+            h.onError(String(e.data ?? '未知错误'), typeof e.status === 'number' ? e.status : undefined);
             resolve();
             break;
         }
@@ -315,7 +317,7 @@ class CapacitorTransport implements Transport {
         case 'error':
           if (!settled) {
             settled = true;
-            h.onError(String(e.data ?? '未知错误'));
+            h.onError(String(e.data ?? '未知错误'), typeof e.status === 'number' ? e.status : undefined);
           }
           break;
       }
@@ -343,7 +345,7 @@ class CapacitorTransport implements Transport {
         }
         if (!settled) {
           settled = true;
-          h.onError(extractErrorMessage(parsed, `HTTP ${res.status}`));
+          h.onError(extractErrorMessage(parsed, `HTTP ${res.status}`), res.status);
         }
         return;
       }
@@ -465,7 +467,7 @@ class WebTransport implements Transport {
         } catch {
           /* 保持原文 */
         }
-        h.onError(extractErrorMessage(parsed, `HTTP ${res.status}`));
+        h.onError(extractErrorMessage(parsed, `HTTP ${res.status}`), res.status);
         return;
       }
 

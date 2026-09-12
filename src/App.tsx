@@ -14,6 +14,15 @@ import type {
 } from './types';
 import { SEED_MODELS, fetchModels, previewBody } from './lib/api';
 import { runAgent, type AgentHandle } from './lib/agent';
+import {
+  clearHealth,
+  mergeProbe,
+  probeModels,
+  recordFailure,
+  recordSuccess,
+  setMuted,
+  type ProbeProgress,
+} from './lib/health';
 import { TOOL_BY_NAME, availableTools } from './lib/tools/registry';
 import {
   loadConversations,
@@ -65,6 +74,11 @@ export default function App() {
   const [models, setModels] = React.useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = React.useState(false);
   const [modelsError, setModelsError] = React.useState<string | null>(null);
+  /** 批量体检的进度；null = 没在跑 */
+  const [probe, setProbe] = React.useState<{ done: number; total: number; current: string } | null>(
+    null,
+  );
+  const probeStopRef = React.useRef(false);
 
   const [busy, setBusy] = React.useState<{ requestId: string; handle: AgentHandle } | null>(null);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
@@ -392,6 +406,84 @@ export default function App() {
 
   /* ---------------- 发送 ---------------- */
 
+  /**
+   * 批量体检：给列表里每个模型发一个最小请求，把死掉的路由挑出来。
+   *
+   * 并发压到 2 并且撞到限流就整体暂停 —— 体检本身把额度打爆的话，
+   * 一批好模型会被记成「限流」，那比不测还糟。
+   */
+  const runProbe = React.useCallback(async () => {
+    if (!settings || !profile) {
+      toast.show('先选一份凭据');
+      return;
+    }
+    if (!models.length) {
+      toast.show('先拉一次模型列表');
+      return;
+    }
+    const key = await secretGet(profile.id);
+    if (!key) {
+      toast.show('这份凭据还没填 API Key');
+      return;
+    }
+
+    probeStopRef.current = false;
+    setProbe({ done: 0, total: models.length, current: '' });
+
+    const out = await probeModels({
+      profile,
+      apiKey: key,
+      models: models.map((m) => m.id),
+      timeoutMs: 30_000,
+      concurrency: 2,
+      onProgress: (p: ProbeProgress) =>
+        setProbe({ done: p.done, total: p.total, current: p.current }),
+      shouldStop: () => probeStopRef.current,
+    });
+
+    setSettings((prev) =>
+      prev
+        ? { ...prev, modelHealth: mergeProbe(prev.modelHealth ?? {}, profile.id, out.health) }
+        : prev,
+    );
+    setProbe(null);
+
+    if (out.fatal) {
+      toast.show(`体检中断：${out.fatal.title}`, 5000);
+      return;
+    }
+    const tested = Object.keys(out.health).length;
+    const bad = Object.values(out.health).filter(
+      (h) => h.status === 'broken' || h.status === 'missing',
+    ).length;
+    toast.show(
+      out.stopped
+        ? `体检已停止，测了 ${tested} 个，其中 ${bad} 个不可用`
+        : `体检完成：${tested} 个里有 ${bad} 个不可用，已从默认列表移出`,
+      5000,
+    );
+  }, [settings, profile, models, toast]);
+
+  const clearProfileHealth = React.useCallback(() => {
+    if (!profile) return;
+    setSettings((prev) =>
+      prev ? { ...prev, modelHealth: clearHealth(prev.modelHealth ?? {}, profile.id) } : prev,
+    );
+    toast.show('已清空这份凭据的体检记录');
+  }, [profile, toast]);
+
+  const muteModel = React.useCallback(
+    (modelId: string, muted: boolean) => {
+      if (!profile) return;
+      setSettings((prev) =>
+        prev
+          ? { ...prev, modelHealth: setMuted(prev.modelHealth ?? {}, profile.id, modelId, muted) }
+          : prev,
+      );
+    },
+    [profile],
+  );
+
   const send = React.useCallback(
     async (text: string, replaceFromIndex?: number) => {
       if (!settings) return;
@@ -493,6 +585,8 @@ export default function App() {
         apiKey,
         config: cfg,
         history,
+        autoRetry: settings.autoRetry ?? 2,
+        profileName: profile.name,
         toolCtx: toolContextOf(settings, conv.projectId ?? null),
         effortMappings: settings.effortMappings,
         extraSystem: [
@@ -536,30 +630,57 @@ export default function App() {
             patchMessage(convId, answerMsg.id, { usage: u });
           },
           onRound() {},
+          onNotice(text) {
+            patchMessage(convId, answerMsg.id, { notice: text || undefined });
+          },
           onDone() {
             clearInterval(timer);
             flush();
             const arts = collectArtifacts(buf.content, steps);
             patchMessage(convId, answerMsg.id, {
               pending: false,
+              notice: undefined,
               content: buf.content,
               reasoning: buf.reasoning,
               elapsedMs: Date.now() - started,
               artifacts: arts.length ? arts : undefined,
             });
+            // 这条路由是活的 —— 把之前攒下的失败记录清零
+            setSettings((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    modelHealth: recordSuccess(prev.modelHealth ?? {}, profile.id, cfg.model),
+                  }
+                : prev,
+            );
             // 只产出一个东西时直接开右侧面板 —— 多个就让用户自己挑
             if (arts.length === 1) setOpenArtifact(arts[0]);
             setBusy(null);
           },
-          onError(msg) {
+          onError(msg, info) {
             clearInterval(timer);
             flush();
             patchMessage(convId, answerMsg.id, {
               pending: false,
+              notice: undefined,
               error: msg,
+              errorInfo: info,
               content: buf.content,
               elapsedMs: Date.now() - started,
             });
+            // 记一笔健康度：确定性的服务端崩溃和「模型不存在」会让这个 ID
+            // 从默认模型列表里消失，限流和超时不算
+            if (info.blameModel) {
+              setSettings((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      modelHealth: recordFailure(prev.modelHealth ?? {}, profile.id, cfg.model, info),
+                    }
+                  : prev,
+              );
+            }
             setBusy(null);
           },
         },
@@ -739,6 +860,14 @@ export default function App() {
       modelsError={modelsError}
       onRefreshModels={() => void refreshModels()}
       onAddModel={addCustomModel}
+      modelHealth={settings.modelHealth ?? {}}
+      probe={probe}
+      onProbe={() => void runProbe()}
+      onStopProbe={() => {
+        probeStopRef.current = true;
+      }}
+      onMuteModel={muteModel}
+      onClearHealth={clearProfileHealth}
       effortLevel={config.effortLevel}
       onEffortLevel={(l: EffortLevel) => setConfig({ effortLevel: l })}
       effortMappings={settings.effortMappings}

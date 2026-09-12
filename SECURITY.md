@@ -78,7 +78,7 @@ Chrome 136 起，`--remote-debugging-port` 在默认用户目录下会被直接�
 
 ## 报告问题
 
-发现安全问题请开 issue：https://github.com/lifishard/anyai/issues
+发现安全问题请开 issue：https://github.com/lifishard/AnyAI/issues
 
 如果觉得不适合公开讨论，在 issue 里说一句「需要私下沟通」即可，别直接贴利用细节。
 

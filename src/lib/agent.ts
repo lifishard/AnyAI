@@ -1,5 +1,6 @@
 import type {
   ChatMessage,
+  ErrorInfo,
   GenerationConfig,
   KeyProfile,
   SourceRef,
@@ -13,6 +14,7 @@ import { buildHeaders, endpoint } from './api';
 import { buildRequestBody, type ContentPart, type WireMessage } from './paramSchema';
 import { TOOL_BY_NAME, availableTools } from './tools/registry';
 import type { EffortMapping } from './effort';
+import { backoffMs, classifyError } from './errors';
 import { getTransport } from './transport';
 import { uid } from './store';
 
@@ -37,8 +39,10 @@ export interface AgentEvents {
   onSources(sources: SourceRef[]): void;
   onUsage(u: Usage): void;
   onRound(round: number, maxRounds: number): void;
+  /** 生成期间的临时提示，例如「限流，3 秒后重试」。传空串表示清掉 */
+  onNotice(text: string): void;
   onDone(): void;
-  onError(message: string): void;
+  onError(message: string, info: ErrorInfo): void;
 }
 
 export interface RunAgentArgs {
@@ -54,6 +58,10 @@ export interface RunAgentArgs {
   extraSystem: string;
   timeoutMs: number;
   canRunHostTools: boolean;
+  /** 限流 / 5xx 时自动重试几次，0 = 关掉 */
+  autoRetry: number;
+  /** 用于错误归类的展示名 */
+  profileName?: string;
   /** 危险工具执行前的确认。返回 false 表示拒绝 */
   confirm(step: ToolStep): Promise<boolean>;
   events: AgentEvents;
@@ -181,6 +189,15 @@ function renderToolOutput(res: ToolResult, numbered: SourceRef[]): string {
   return `可引用来源（在回答里用方括号编号引用）：\n${head}\n\n---\n${res.content}`;
 }
 
+/** 可被中止打断的等待 */
+async function sleep(ms: number, aborted: () => boolean): Promise<void> {
+  const step = 120;
+  for (let left = ms; left > 0; left -= step) {
+    if (aborted()) return;
+    await new Promise((r) => setTimeout(r, Math.min(step, left)));
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * 主循环
  * ------------------------------------------------------------------ */
@@ -203,6 +220,12 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
       const toolNames = cfg.toolsEnabled
         ? cfg.enabledTools.filter((n) => usable.has(n) && TOOL_BY_NAME[n])
         : [];
+
+      // 最后一条用户消息带没带图，用来把「纯文本模型收到图片」的 400 翻译准确
+      const hasImage = [...args.history]
+        .reverse()
+        .find((m) => m.role === 'user')
+        ?.attachments?.some((a) => a.kind === 'image') ?? false;
 
       // 这一整次提问累积的历史（含工具往返），每轮都在它上面追加
       const working: ChatMessage[] = [...args.history];
@@ -227,43 +250,81 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
         let roundCalls: ToolCall[] = [];
         // 放在对象里而不是裸 let：闭包里赋的值 TS 的控制流分析看不见，
         // 裸变量会被窄化成 null，后面 if 判断直接被当成死代码
-        const roundState: { failed: string | null } = { failed: null };
+        const roundState: { failed: string | null; status?: number } = { failed: null };
 
-        await getTransport().chat(
-          {
-            requestId: args.requestId,
-            url: endpoint(args.profile.baseUrl, 'chat/completions'),
-            headers: buildHeaders(args.apiKey, args.profile),
-            body,
-            stream: cfg.stream,
-            timeoutMs: args.timeoutMs,
-          },
-          {
-            onContent(d) {
-              roundContent += d;
-              events.onContentDelta(d);
-            },
-            onReasoning(d) {
-              roundReasoning += d;
-              events.onReasoningDelta(d);
-            },
-            onToolCalls(calls) {
-              roundCalls = calls;
-            },
-            onUsage(u) {
-              events.onUsage(u);
-            },
-            onDone() {},
-            onError(msg) {
-              roundState.failed = msg;
-            },
-          },
-        );
+        /*
+         * 限流和瞬时 5xx 都属于「等一会儿再来就好」，让用户自己点重发是把
+         * 本可以自动处理的事丢回给人。这里退避重试。
+         *
+         * 只在**一个字都还没吐出来**时才重试 —— 流式已经开始之后重试会让
+         * 前半段内容在界面上出现两次，那比直接报错更糟。
+         */
+        const maxAttempts = 1 + Math.max(0, args.autoRetry);
+        for (let attempt = 1; ; attempt++) {
+          roundContent = '';
+          roundReasoning = '';
+          roundCalls = [];
+          roundState.failed = null;
+          roundState.status = undefined;
 
-        if (roundState.failed) {
-          events.onError(roundState.failed);
-          return;
+          await getTransport().chat(
+            {
+              requestId: args.requestId,
+              url: endpoint(args.profile.baseUrl, 'chat/completions'),
+              headers: buildHeaders(args.apiKey, args.profile),
+              body,
+              stream: cfg.stream,
+              timeoutMs: args.timeoutMs,
+            },
+            {
+              onContent(d) {
+                roundContent += d;
+                events.onContentDelta(d);
+              },
+              onReasoning(d) {
+                roundReasoning += d;
+                events.onReasoningDelta(d);
+              },
+              onToolCalls(calls) {
+                roundCalls = calls;
+              },
+              onUsage(u) {
+                events.onUsage(u);
+              },
+              onDone() {},
+              onError(msg, status) {
+                roundState.failed = msg;
+                roundState.status = status;
+              },
+            },
+          );
+
+          if (!roundState.failed || aborted) break;
+
+          const info = classifyError(roundState.failed, roundState.status, {
+            model: cfg.model,
+            profileName: args.profileName,
+            sentEffort: cfg.effortLevel !== 'off',
+            sentTools: toolNames.length > 0,
+            sentImage: hasImage,
+          });
+          const emitted = roundContent.length > 0 || roundReasoning.length > 0;
+
+          if (!info.retryable || emitted || attempt >= maxAttempts) {
+            events.onNotice('');
+            events.onError(roundState.failed, info);
+            return;
+          }
+
+          const wait = backoffMs(attempt, info);
+          events.onNotice(
+            `${info.title} — ${Math.ceil(wait / 1000)} 秒后自动重试（第 ${attempt}/${maxAttempts - 1} 次）`,
+          );
+          await sleep(wait, () => aborted);
+          if (aborted) break;
         }
+
+        events.onNotice('');
         if (aborted) break;
 
         // 没有工具调用 = 这就是最终回答
@@ -400,7 +461,15 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               onToolCalls: () => {},
               onUsage: (u) => events.onUsage(u),
               onDone: () => {},
-              onError: (m) => events.onError(m),
+              onError: (m, status) =>
+                events.onError(
+                  m,
+                  classifyError(m, status, {
+                    model: cfg.model,
+                    profileName: args.profileName,
+                    sentEffort: cfg.effortLevel !== 'off',
+                  }),
+                ),
             },
           );
         }
@@ -408,7 +477,8 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
 
       events.onDone();
     } catch (err) {
-      events.onError(err instanceof Error ? err.message : String(err));
+      const m = err instanceof Error ? err.message : String(err);
+      events.onError(m, classifyError(m, undefined, { model: cfg.model }));
     }
   })();
 

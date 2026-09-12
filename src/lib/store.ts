@@ -48,6 +48,8 @@ export function defaultSettings(): AppSettings {
     tools: defaultToolConfig(),
     remote: { enabled: false, url: '', token: '' },
     effortMappings: defaultEffortMappings(),
+    modelHealth: {},
+    autoRetry: 2,
   };
 }
 

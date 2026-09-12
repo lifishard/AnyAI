@@ -110,9 +110,11 @@ function buildMenu() {
  * 三个平台共用一份实现，主进程不重复造。
  * ------------------------------------------------------------------ */
 
-function emit(sender, requestId, type, data) {
+function emit(sender, requestId, type, data, status) {
   if (sender.isDestroyed()) return;
-  sender.send('snc:event', { requestId, type, data });
+  // status 只在 type === 'error' 时有意义：渲染层要靠它把「限流」和
+  // 「这条路由坏了」区分开，光看报错文案是分不出来的
+  sender.send('snc:event', { requestId, type, data, status });
 }
 
 async function handleChat(evt, init) {
@@ -142,7 +144,7 @@ async function handleChat(evt, init) {
       } catch {
         /* 保持原文 */
       }
-      emit(sender, requestId, 'error', extractErrorMessage(parsed, `HTTP ${res.status}`));
+      emit(sender, requestId, 'error', extractErrorMessage(parsed, `HTTP ${res.status}`), res.status);
       return;
     }
 

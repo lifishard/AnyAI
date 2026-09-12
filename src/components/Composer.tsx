@@ -1,5 +1,11 @@
 import React from 'react';
-import type { ApprovalMode, Attachment, KeyProfile, ModelInfo } from '../types';
+import type {
+  ApprovalMode,
+  Attachment,
+  KeyProfile,
+  ModelHealthMap,
+  ModelInfo,
+} from '../types';
 import type { EffortLevel, EffortMapping } from '../lib/effort';
 import type { Skill } from '../lib/skills';
 import type { ProjectPrompt } from '../lib/projects';
@@ -57,6 +63,13 @@ export default function Composer(props: {
   modelsError: string | null;
   onRefreshModels: () => void;
   onAddModel: (id: string) => void;
+  /** 模型健康度：坏掉的路由默认不进列表 */
+  modelHealth: ModelHealthMap;
+  probe: { done: number; total: number; current: string } | null;
+  onProbe: () => void;
+  onStopProbe: () => void;
+  onMuteModel: (id: string, muted: boolean) => void;
+  onClearHealth: () => void;
 
   /* 思考强度 */
   effortLevel: EffortLevel;
@@ -434,6 +447,12 @@ export default function Composer(props: {
               error={props.modelsError}
               onRefresh={props.onRefreshModels}
               onAddModel={props.onAddModel}
+              health={props.modelHealth}
+              probe={props.probe}
+              onProbe={props.onProbe}
+              onStopProbe={props.onStopProbe}
+              onMute={props.onMuteModel}
+              onClearHealth={props.onClearHealth}
             />
 
             <span className="spacer" />

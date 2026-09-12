@@ -1,5 +1,5 @@
 import React from 'react';
-import type { Artifact, ChatMessage, SourceRef, ToolStep } from '../types';
+import type { Artifact, ChatMessage, ErrorInfo, SourceRef, ToolStep } from '../types';
 import { ArtifactStrip } from './ArtifactPanel';
 import { TOOL_BY_NAME } from '../lib/tools/registry';
 import Markdown from './Markdown';
@@ -43,6 +43,70 @@ export function SourcesRow({ sources }: { sources: SourceRef[] }) {
             <div className="source-title">{s.title}</div>
           </a>
         ))}
+      </div>
+    </div>
+  );
+}
+
+
+/* ------------------------------------------------------------------ *
+ * 错误卡片
+ *
+ * 上游报错原文是给写后端的人看的。这里先说清楚「发生了什么」，再给
+ * 「现在该做什么」，原文折叠在最后 —— 需要它的人是在开 issue，不是在排查。
+ * ------------------------------------------------------------------ */
+
+const KIND_ICON: Record<string, string> = {
+  auth: '🔑',
+  quota: '💳',
+  rate_limit: '⏳',
+  model_missing: '🔍',
+  model_broken: '🧱',
+  bad_param: '🎛',
+  context_too_long: '📏',
+  multimodal: '🖼',
+  tools_unsupported: '🔧',
+  network: '🌐',
+  timeout: '⏱',
+  unknown: '⚠',
+};
+
+function ErrorCard(props: { raw: string; info?: ErrorInfo; onRetry?: () => void }) {
+  const info = props.info;
+  if (!info) {
+    return (
+      <div className="answer-error">
+        <strong>请求失败：</strong>
+        {props.raw}
+      </div>
+    );
+  }
+  return (
+    <div className="answer-error card">
+      <div className="err-head">
+        <span className="err-icon">{KIND_ICON[info.kind] ?? '⚠'}</span>
+        <span className="err-title">{info.title}</span>
+        {info.status ? <span className="err-code">HTTP {info.status}</span> : null}
+      </div>
+
+      {info.fixes.length ? (
+        <ul className="err-fixes">
+          {info.fixes.map((f, i) => (
+            <li key={i}>{f}</li>
+          ))}
+        </ul>
+      ) : null}
+
+      <div className="err-foot">
+        {props.onRetry ? (
+          <button className="btn sm primary" onClick={props.onRetry}>
+            重新发送
+          </button>
+        ) : null}
+        <details className="err-raw">
+          <summary>上游原文</summary>
+          <pre>{props.raw}</pre>
+        </details>
       </div>
     </div>
   );
@@ -208,11 +272,10 @@ export default function AnswerBlock(props: {
         </details>
       ) : null}
 
+      {answer?.notice ? <div className="answer-notice">{answer.notice}</div> : null}
+
       {answer?.error ? (
-        <div className="answer-error">
-          <strong>请求失败：</strong>
-          {answer.error}
-        </div>
+        <ErrorCard raw={answer.error} info={answer.errorInfo} onRetry={props.onRetry} />
       ) : null}
 
       {answer && !answer.error ? (

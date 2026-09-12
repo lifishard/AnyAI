@@ -153,6 +153,10 @@ export interface ChatMessage {
   createdAt: number;
   pending?: boolean;
   error?: string;
+  /** 结构化的失败信息：怎么回事 + 怎么办，用来渲染可操作的错误卡片 */
+  errorInfo?: ErrorInfo;
+  /** 生成过程中的临时提示（限流重试倒计时之类），成功后清掉 */
+  notice?: string;
   usage?: Usage;
   model?: string;
   elapsedMs?: number;
@@ -240,6 +244,10 @@ export interface AppSettings {
   remote: RemoteConfig;
   /** 思考强度的跨厂商映射表 */
   effortMappings: EffortMapping[];
+  /** 模型健康度：哪些 ID 在这份凭据下是坏的，默认不进模型列表 */
+  modelHealth: ModelHealthMap;
+  /** 请求失败后自动重试的次数上限（限流和 5xx 才重试），0 = 关掉 */
+  autoRetry: number;
 }
 
 /* ---------------- 传输层协议 ---------------- */
@@ -250,7 +258,8 @@ export interface ChatStreamHandlers {
   onToolCalls(calls: ToolCall[]): void;
   onUsage(usage: Usage): void;
   onDone(): void;
-  onError(message: string): void;
+  /** status 是上游的 HTTP 状态码，拿不到时为 undefined（网络层直接挂了） */
+  onError(message: string, status?: number): void;
 }
 
 export interface ChatRequestInit {
@@ -318,3 +327,55 @@ export interface Transport {
   secretSet(id: string, value: string): Promise<void>;
   secretDelete(id: string): Promise<void>;
 }
+
+/* ---------------- 错误分类与模型健康度 ---------------- */
+
+export type ErrorKind =
+  | 'auth'            // key 不对 / 没权限
+  | 'rate_limit'      // tpm / rpm / 并发打满
+  | 'quota'           // 余额或配额用尽
+  | 'model_missing'   // 这个 ID 在上游不存在
+  | 'model_broken'    // 上游 5xx：那条路由自己坏了
+  | 'bad_param'       // 400：某个下发的字段这个模型不认
+  | 'context_too_long'
+  | 'multimodal'      // 给纯文本模型发了图
+  | 'tools_unsupported'
+  | 'network'
+  | 'timeout'
+  | 'unknown';
+
+export interface ErrorInfo {
+  kind: ErrorKind;
+  /** 一句话说清楚发生了什么，给人看的，不是给日志看的 */
+  title: string;
+  /** 上游原文，折叠展示 */
+  detail: string;
+  /** 怎么办，按「最可能有用」排序 */
+  fixes: string[];
+  /** 等一会儿重试有没有意义 */
+  retryable: boolean;
+  /** 上游明确说了等多久，或我们的退避建议 */
+  retryAfterMs?: number;
+  /** 这个锅该不该算在当前模型头上（算了就进「有问题的模型」区） */
+  blameModel: boolean;
+  status?: number;
+}
+
+export type ModelHealthStatus = 'ok' | 'broken' | 'missing' | 'ratelimited' | 'timeout' | 'unknown';
+
+export interface ModelHealth {
+  status: ModelHealthStatus;
+  /** 上游 HTTP 状态码 */
+  code?: number;
+  /** 简短原因，鼠标悬停时显示 */
+  reason?: string;
+  /** 最后一次判定的时间 */
+  at: number;
+  /** 连续失败次数；成功一次就清零 */
+  fails: number;
+  /** 用户手动压下的：不管探测结果如何都不在默认列表里显示 */
+  muted?: boolean;
+}
+
+/** profileId → modelId → 健康度 */
+export type ModelHealthMap = Record<string, Record<string, ModelHealth>>;

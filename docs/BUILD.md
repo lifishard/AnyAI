@@ -8,7 +8,7 @@
   跨平台产物交给 GitHub Actions，见下。
 
 ```bash
-git clone https://github.com/lifishard/anyai.git
+git clone https://github.com/lifishard/AnyAI.git
 cd anyai
 npm install
 ```
@@ -99,16 +99,18 @@ npx cap open android       # 用 Android Studio 打开，Build → APK
 
 ## 发布到 GitHub
 
-### 一次性：认领这个仓库
+### 一次性：认领这个仓库（fork 之后）
 
-代码里的 `lifishard` 是占位符。改成你自己的：
+仓库地址散落在 package.json、README、SECURITY 和这份文档里。fork 之后跑一次这个脚本，
+它会把它们全部指向你自己的仓库：
 
 ```bash
 node scripts/init-repo.mjs <owner> [repo]
 # 例：node scripts/init-repo.mjs octocat anyai
 ```
 
-会替换 `package.json` / `README.md` / `docs/CONFIGURATION.md` / `SECURITY.md` 里的占位符。
+脚本匹配的是当前仓库的 `owner/repo` 字样，改完自检一下
+`grep -rn "github.com/" package.json README.md SECURITY.md docs/`。
 
 然后推上去：
 

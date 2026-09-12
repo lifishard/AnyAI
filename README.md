@@ -10,7 +10,7 @@
 不是聊天壳子：它会联网查证、读写本地文件、控制 Chrome、调 GitHub API，
 也能把整件编码活儿转包给本机的 Claude Code。
 
-[![CI](https://github.com/lifishard/anyai/actions/workflows/ci.yml/badge.svg)](https://github.com/lifishard/anyai/actions/workflows/ci.yml)
+[![CI](https://github.com/lifishard/AnyAI/actions/workflows/ci.yml/badge.svg)](https://github.com/lifishard/AnyAI/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 [下载](#安装) · [配置说明](docs/CONFIGURATION.md) · [从源码构建](docs/BUILD.md) · [架构](docs/ARCHITECTURE.md) · [安全](SECURITY.md)
@@ -61,7 +61,7 @@
 
 ### 下载现成的
 
-去 [Releases](https://github.com/lifishard/anyai/releases) 拿对应平台的包：
+去 [Releases](https://github.com/lifishard/AnyAI/releases) 拿对应平台的包：
 
 | 平台 | 文件 |
 |---|---|
@@ -81,7 +81,7 @@ xattr -dr com.apple.quarantine /Applications/AnyAI.app
 ### 从源码构建
 
 ```bash
-git clone https://github.com/lifishard/anyai.git
+git clone https://github.com/lifishard/AnyAI.git
 cd anyai
 npm install
 npm run dist:win      # 或 dist:mac / dist:linux
@@ -147,7 +147,7 @@ Agent 循环 (src/lib/agent.ts)
 - **图片附件要模型支持多模态**，纯文本模型收到图片会直接 400
 - **没有自动更新**，更新靠自己下新版本
 
-发现问题欢迎开 [issue](https://github.com/lifishard/anyai/issues)，
+发现问题欢迎开 [issue](https://github.com/lifishard/AnyAI/issues)，
 带上端点、模型 ID 和请求体预览（记得去掉 Key）。参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可

@@ -164,11 +164,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/lifishard/anyai.git"
+    "url": "https://github.com/lifishard/AnyAI.git"
   },
-  "homepage": "https://github.com/lifishard/anyai",
+  "homepage": "https://github.com/lifishard/AnyAI",
   "bugs": {
-    "url": "https://github.com/lifishard/anyai/issues"
+    "url": "https://github.com/lifishard/AnyAI/issues"
   },
   "engines": {
     "node": ">=20"

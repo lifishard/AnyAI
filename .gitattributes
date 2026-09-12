@@ -1,0 +1,20 @@
+# 仓库内统一存 LF，检出时按需还原。
+# 不加这个的话，Windows 上 clone 出来的工作区跟 Linux/Mac 的换行符不一致，
+# 第一次改动就会产生整文件的 diff。
+* text=auto eol=lf
+
+# 批处理文件必须是 CRLF：cmd.exe 按字节偏移读文件，LF 结尾在某些
+# label / goto 场景下会解析错位。
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# gradlew 是 shell 脚本，永远 LF
+gradlew        text eol=lf
+*.sh           text eol=lf
+
+# 二进制，别碰
+*.png  binary
+*.ico  binary
+*.jar  binary
+*.keystore binary
