@@ -13,6 +13,7 @@ const github = require('./github.cjs');
 const claudecode = require('./claudecode.cjs');
 const knowledge = require('./knowledge.cjs');
 const documents = require('./documents.cjs');
+const computer = require('./computer.cjs');
 
 /** 按 id 取密钥。工具模块通过这个函数拿，拿不到就返回 null */
 async function secrets(id) {
@@ -36,6 +37,13 @@ const HANDLERS = {
   search_files: (a, c) => files.searchFiles(a, c),
 
   run_command: (a, c) => shell.runCommand(a, c),
+
+  computer_screenshot: (a, c) => computer.screenshot(a, c),
+  computer_click: (a, c) => computer.click(a, c),
+  computer_move: (a, c) => computer.moveMouse(a, c),
+  computer_scroll: (a, c) => computer.scroll(a, c),
+  computer_type: (a, c) => computer.typeText(a, c),
+  computer_key: (a, c) => computer.pressKey(a, c),
 
   chrome_tabs: (a, c) => chrome.chromeTabs(a, c),
   chrome_navigate: (a, c) => chrome.chromeNavigate(a, c),

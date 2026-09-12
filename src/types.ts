@@ -281,6 +281,32 @@ export interface ToolResult {
   error?: string;
   /** 这次调用产出/改动了哪个文件，右侧产物面板靠它收集 */
   filePath?: string;
+  /**
+   * 工具返回的图片（截屏）。工具消息本身塞不进图片（多数网关只认文本），
+   * 所以 agent 会在工具结果之后补一条带图的 user 消息。
+   */
+  imageDataUrl?: string;
+}
+
+/**
+ * 会话级的额外授权。
+ *
+ * 刻意**不落盘**：关掉应用就没了，下次要用再申请一次。
+ * 一个能执行命令、能控屏幕的权限如果被永久记住，用户迟早会忘了自己给过。
+ */
+export interface SessionGrants {
+  /** 临时放行的目录，并进 workspaceRoots */
+  extraRoots: string[];
+  /** 允许 run_command 提权（执行时系统仍会弹 UAC） */
+  admin: boolean;
+  /** 允许截屏和控制鼠标键盘 */
+  screen: boolean;
+}
+
+export interface AccessRequest {
+  scope: 'path' | 'admin' | 'screen';
+  target?: string;
+  reason: string;
 }
 
 /** 一次回答产出的东西：写出去的文件，或答案里可以直接跑的代码块 */
@@ -310,6 +336,8 @@ export interface ToolContext {
   toolTimeoutMs: number;
   /** 当前对话属于哪个项目 —— 项目记忆/文档类工具靠它定位 */
   projectId: string | null;
+  /** 本次会话临时授予的权限。原生层据此决定放不放行提权和屏幕控制 */
+  grants: SessionGrants;
 }
 
 export interface Transport {

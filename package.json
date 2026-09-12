@@ -1,7 +1,7 @@
 {
   "name": "anyai",
   "version": "1.0.0",
-  "description": "AnyAI — 自带 API Key 的多模型 Agent 桌面客户端：联网查证、读写本地文件、控制 Chrome、调用 Claude Code",
+  "description": "AnyAI — BYOK 多模型 Agent 桌面客户端（用你自己的 API Key）：联网查证、读写本地文件、控制 Chrome、调用 Claude Code",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -87,10 +87,10 @@
           ]
         }
       ],
-      "icon": "build/icon.ico",
-      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+      "icon": "build/icon.ico"
     },
     "nsis": {
+      "artifactName": "${productName}-${version}-win-${arch}-setup.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
@@ -98,6 +98,9 @@
       "createStartMenuShortcut": true,
       "shortcutName": "AnyAI",
       "runAfterFinish": true
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-win-${arch}-portable.${ext}"
     },
     "mac": {
       "target": [

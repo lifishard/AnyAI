@@ -2,6 +2,7 @@ import type {
   AppSettings,
   Conversation,
   GenerationConfig,
+  SessionGrants,
   ToolConfig,
   ToolContext,
 } from '../types';
@@ -54,10 +55,17 @@ export function defaultSettings(): AppSettings {
 }
 
 /** 从设置里拎出传给原生层的工具上下文（不含密钥） */
-export function toolContextOf(s: AppSettings, projectId: string | null = null): ToolContext {
+export function toolContextOf(
+  s: AppSettings,
+  projectId: string | null = null,
+  grants: SessionGrants = { extraRoots: [], admin: false, screen: false },
+): ToolContext {
   return {
     projectId,
-    workspaceRoots: s.tools.workspaceRoots,
+    grants,
+    // 会话里临时放行的目录并进白名单 —— 它们跟设置里那些一样要过 guardPath，
+    // 只是活不过这次会话
+    workspaceRoots: [...s.tools.workspaceRoots, ...grants.extraRoots],
     searchProvider: s.tools.searchProvider,
     searxngUrl: s.tools.searxngUrl,
     chromePort: s.tools.chromePort,

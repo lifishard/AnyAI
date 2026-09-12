@@ -1,4 +1,5 @@
 import type {
+  AccessRequest,
   ChatMessage,
   ErrorInfo,
   GenerationConfig,
@@ -52,7 +53,12 @@ export interface RunAgentArgs {
   config: GenerationConfig;
   /** 历史消息，不含本轮正在生成的那条 assistant */
   history: ChatMessage[];
-  toolCtx: ToolContext;
+  /**
+   * 每次调工具前现取一次，而不是开跑时定死一份 —— 会话中途拿到的新授权
+   * （目录 / 管理员 / 屏幕）必须对**后面**的工具调用立刻生效，
+   * 否则模型申请完还得等下一轮才能用，白白多烧一轮。
+   */
+  toolCtx: () => ToolContext;
   effortMappings: EffortMapping[];
   /** 项目规范 / 记忆 / 文档目录 / 本轮唤起的技能，拼在 system prompt 里 */
   extraSystem: string;
@@ -64,6 +70,11 @@ export interface RunAgentArgs {
   profileName?: string;
   /** 危险工具执行前的确认。返回 false 表示拒绝 */
   confirm(step: ToolStep): Promise<boolean>;
+  /**
+   * 模型申请会话级权限（目录 / 管理员 / 屏幕）。
+   * 这一步不走原生层：授权状态活在渲染进程里，必须由用户在弹窗上点头。
+   */
+  grantAccess(req: AccessRequest): Promise<ToolResult>;
   events: AgentEvents;
 }
 
@@ -402,7 +413,16 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
 
           let res: ToolResult;
           try {
-            res = await getTransport().callTool(call.name, parsedArgs, args.toolCtx);
+            if (call.name === 'request_access') {
+              // 授权状态活在渲染进程里，原生层没法也不该自己发放
+              res = await args.grantAccess({
+                scope: String(parsedArgs.scope ?? '') as AccessRequest['scope'],
+                target: parsedArgs.target ? String(parsedArgs.target) : undefined,
+                reason: String(parsedArgs.reason ?? ''),
+              });
+            } else {
+              res = await getTransport().callTool(call.name, parsedArgs, args.toolCtx());
+            }
           } catch (e) {
             res = { ok: false, content: '', error: e instanceof Error ? e.message : String(e) };
           }
@@ -434,6 +454,27 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
             },
             renderToolOutput(res, fresh),
           );
+
+          // 截屏这类工具返回的是图。多数 OpenAI 兼容端点不接受 role=tool 里带
+          // 图片，所以补一条 user 消息把图递进去 —— 模型看得到才谈得上「看着点」。
+          if (res.imageDataUrl) {
+            working.push({
+              id: uid('m'),
+              role: 'user',
+              content: '（上一步工具返回的截图）',
+              attachments: [
+                {
+                  id: uid('att'),
+                  kind: 'image',
+                  name: 'screenshot.png',
+                  mime: 'image/png',
+                  size: res.imageDataUrl.length,
+                  dataUrl: res.imageDataUrl,
+                },
+              ],
+              createdAt: Date.now(),
+            });
+          }
         }
 
         if (round === maxRounds) {

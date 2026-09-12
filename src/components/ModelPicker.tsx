@@ -1,6 +1,7 @@
 import React from 'react';
 import type { KeyProfile, ModelHealth, ModelHealthMap, ModelHealthStatus, ModelInfo } from '../types';
 import { healthOf, partitionModels } from '../lib/health';
+import { nonChatReason } from '../lib/modelKind';
 
 /**
  * 模型 + 凭据选择器，挂在输入框左下角，作用域是**当前会话**。
@@ -54,6 +55,9 @@ export default function ModelPicker(props: {
   const [open, setOpen] = React.useState(false);
   const [q, setQ] = React.useState('');
   const [showBad, setShowBad] = React.useState(false);
+  // 默认只看聊天模型：聚合网关会把 SD checkpoint、embedding、语音模型
+  // 全列进 /models，它们打不通 /chat/completions，混在列表里纯属噪音
+  const [chatOnly, setChatOnly] = React.useState(true);
   const [limit, setLimit] = React.useState(PAGE);
   const anchorRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
@@ -79,9 +83,19 @@ export default function ModelPicker(props: {
   // 换搜索词就回到第一页，否则翻到第 5 页再搜会看到莫名其妙的一大串
   React.useEffect(() => setLimit(PAGE), [q]);
 
-  const { good, bad } = React.useMemo(
+  const { good: healthyModels, bad } = React.useMemo(
     () => partitionModels(props.models, props.health, props.profileId),
     [props.models, props.health, props.profileId],
+  );
+
+  /** 非聊天模型（图像 / 向量 / 语音）—— 只影响默认显示，开关一关就全回来 */
+  const nonChat = React.useMemo(
+    () => healthyModels.filter((m) => nonChatReason(m) !== null),
+    [healthyModels],
+  );
+  const good = React.useMemo(
+    () => (chatOnly ? healthyModels.filter((m) => nonChatReason(m) === null) : healthyModels),
+    [healthyModels, chatOnly],
   );
 
   const match = React.useCallback(
@@ -130,7 +144,9 @@ export default function ModelPicker(props: {
 
   const renderItem = (m: ModelInfo, broken: boolean) => {
     const h = healthOf(props.health, props.profileId, m.id);
-    const verified = !broken && h?.status === 'ok';
+    // 「返回 200 但正文是空的」不给勾 —— 那多半根本不是聊天模型
+    const verified = !broken && h?.status === 'ok' && !h.reason;
+    const hollow = !broken && h?.status === 'ok' && Boolean(h.reason);
     return (
       <div key={m.id} className={`picker-row${m.id === props.model ? ' on' : ''}`}>
         <button
@@ -147,7 +163,21 @@ export default function ModelPicker(props: {
         >
           <span className="picker-item-id">{m.label ?? m.id}</span>
           {m.custom ? <span className="badge-off">手动</span> : null}
-          {verified ? <span className="badge-ok" title="体检通过">✓</span> : null}
+          {!broken && nonChatReason(m) ? (
+            <span className="badge-off" title="打不通 /chat/completions">
+              {nonChatReason(m)}
+            </span>
+          ) : null}
+          {verified ? (
+            <span className="badge-ok" title="体检通过">
+              ✓
+            </span>
+          ) : null}
+          {hollow ? (
+            <span className="badge-off" title={h!.reason}>
+              空响应
+            </span>
+          ) : null}
           {broken && h?.code ? <span className="badge-bad">{h.code}</span> : null}
           {m.ownedBy ? <span className="picker-item-owner">{m.ownedBy}</span> : null}
         </button>
@@ -219,6 +249,23 @@ export default function ModelPicker(props: {
                 {q.trim() ? `匹配 ${filtered.length} / ${good.length}` : `${good.length} 个可用`}
               </span>
             </div>
+
+            {nonChat.length > 0 ? (
+              <button
+                className={`chat-only${chatOnly ? ' on' : ''}`}
+                onClick={() => setChatOnly((v) => !v)}
+                title={
+                  chatOnly
+                    ? `已隐藏 ${nonChat.length} 个非聊天模型（图像生成、向量、语音），点一下显示出来`
+                    : '点一下只看聊天模型'
+                }
+              >
+                <span>{chatOnly ? '☑' : '☐'}</span> 只看聊天模型
+                <span className="hint">
+                  {chatOnly ? `已隐藏 ${nonChat.length} 个` : `含 ${nonChat.length} 个非聊天模型`}
+                </span>
+              </button>
+            ) : null}
 
             <input
               ref={inputRef}
@@ -292,7 +339,8 @@ export default function ModelPicker(props: {
             {/* 有问题的模型：按原因分组 */}
             {bad.length > 0 ? (
               <div className="picker-bad">
-                <button className="picker-bad-head" onClick={() => setShowBad((v) => !v)}>
+                <div className="picker-bad-row">
+                  <button className="picker-bad-head" onClick={() => setShowBad((v) => !v)}>
                   <span>{showBad ? '▾' : '▸'}</span>
                   有问题的模型 {bad.length} 个
                   <span className="hint" style={{ marginLeft: 6 }}>
@@ -307,6 +355,22 @@ export default function ModelPicker(props: {
                       .join(' · ')}
                   </span>
                 </button>
+                <button
+                  className="icon-btn sm"
+                  title="把这些模型 ID 连同失败原因复制出来"
+                  onClick={() => {
+                    const text = bad
+                      .map((m) => {
+                        const h = healthOf(props.health, props.profileId, m.id);
+                        return `${m.id}\t${h?.code ?? ''}\t${h?.reason ?? ''}`;
+                      })
+                      .join('\n');
+                    void navigator.clipboard.writeText(text);
+                  }}
+                >
+                    ⧉
+                  </button>
+                </div>
 
                 {showBad ? (
                   <div className="picker-list short">

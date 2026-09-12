@@ -1,5 +1,6 @@
 import React from 'react';
 import type {
+  AccessRequest,
   AppSettings,
   ApprovalMode,
   Artifact,
@@ -9,7 +10,9 @@ import type {
   GenerationConfig,
   KeyProfile,
   ModelInfo,
+  SessionGrants,
   SourceRef,
+  ToolResult,
   ToolStep,
 } from './types';
 import { SEED_MODELS, fetchModels, previewBody } from './lib/api';
@@ -56,6 +59,7 @@ import ArtifactPanel from './components/ArtifactPanel';
 import Resizer from './components/Resizer';
 import ErrorBoundary from './components/ErrorBoundary';
 import ToolConfirm from './components/ToolConfirm';
+import GrantDialog from './components/GrantDialog';
 import WorkspaceDialog from './components/WorkspaceDialog';
 import { Modal, Toast, useToast } from './components/ui';
 
@@ -92,6 +96,24 @@ export default function App() {
 
   const [confirmReq, setConfirmReq] = React.useState<{
     step: ToolStep;
+    resolve: (ok: boolean) => void;
+  } | null>(null);
+
+  /**
+   * 模型申请来的额外权限。刻意只放在 React state 里：应用一关就没了，
+   * 下次要用得重新申请。能执行命令、能控屏幕的授权如果被永久记住，
+   * 用户迟早会忘了自己给过。
+   */
+  const [grants, setGrants] = React.useState<SessionGrants>({
+    extraRoots: [],
+    admin: false,
+    screen: false,
+  });
+  const grantsRef = React.useRef(grants);
+  grantsRef.current = grants;
+
+  const [grantReq, setGrantReq] = React.useState<{
+    req: AccessRequest;
     resolve: (ok: boolean) => void;
   } | null>(null);
 
@@ -339,6 +361,22 @@ export default function App() {
     }
   }
 
+  /**
+   * 授权通过后把对应的工具一起打开。
+   *
+   * 不这么做的话会出现一个很蠢的局面：用户在弹窗上同意了「控制屏幕」，
+   * 模型转头发现 computer_* 根本没在启用列表里 —— 同意了个寂寞。
+   * 同意授权本来就是「我要它能做这件事」的意思。
+   */
+  function enableToolsNow(names: string[]) {
+    const cur = active ? active.config : settings?.defaultConfig;
+    if (!cur) return;
+    const next = Array.from(new Set([...(cur.enabledTools ?? []), ...names]));
+    setConfig({ toolsEnabled: true, enabledTools: next });
+  }
+  const enableToolsRef = React.useRef(enableToolsNow);
+  enableToolsRef.current = enableToolsNow;
+
   /* ---------------- 附件 / 工作目录 ---------------- */
 
   async function addAttachments(mode: 'file' | 'image') {
@@ -464,6 +502,100 @@ export default function App() {
     );
   }, [settings, profile, models, toast]);
 
+  /**
+   * 模型申请会话级权限。同意之后只写进 React state —— 不落盘、不跨会话。
+   *
+   * 三种 scope 的共同点：它们都扩大了「模型能碰到什么」的边界，所以每一次
+   * 都要用户亲自点。已经有的授权直接回「已有」，不重复打扰。
+   */
+  const grantAccess = React.useCallback((req: AccessRequest): Promise<ToolResult> => {
+    const scope = req.scope;
+    if (scope !== 'path' && scope !== 'admin' && scope !== 'screen') {
+      return Promise.resolve({
+        ok: false,
+        content: '',
+        error: `不认识的 scope：${String(scope)}。只能是 path、admin、screen 三者之一。`,
+      });
+    }
+    if (scope === 'path' && !req.target) {
+      return Promise.resolve({
+        ok: false,
+        content: '',
+        error: 'scope="path" 必须同时给 target，填要访问的目录的绝对路径。',
+      });
+    }
+    if (!req.reason || req.reason.trim().length < 4) {
+      return Promise.resolve({
+        ok: false,
+        content: '',
+        error: '必须给出具体理由：你要用这个权限做什么。理由会原样展示给用户看。',
+      });
+    }
+
+    const g = grantsRef.current;
+    if (scope === 'admin' && g.admin) {
+      return Promise.resolve({ ok: true, content: '这次会话已经有管理员授权了，直接用 run_command 的 elevated 参数即可。', summary: '已有授权' });
+    }
+    if (scope === 'screen' && g.screen) {
+      return Promise.resolve({ ok: true, content: '这次会话已经有屏幕控制授权了，可以直接截屏和操作。', summary: '已有授权' });
+    }
+    if (scope === 'path' && req.target && g.extraRoots.includes(req.target)) {
+      return Promise.resolve({ ok: true, content: `${req.target} 已经在可访问范围里了。`, summary: '已有授权' });
+    }
+
+    return new Promise<ToolResult>((resolve) => {
+      setGrantReq({
+        req,
+        resolve: (okGranted) => {
+          if (!okGranted) {
+            resolve({
+              ok: false,
+              content: '',
+              error:
+                '用户拒绝了这次权限申请。不要反复申请同一项 —— 换一个不需要它的做法，' +
+                '或者直接问用户希望怎么处理。',
+            });
+            return;
+          }
+          setGrants((prev) =>
+            scope === 'path'
+              ? { ...prev, extraRoots: Array.from(new Set([...prev.extraRoots, req.target as string])) }
+              : scope === 'admin'
+                ? { ...prev, admin: true }
+                : { ...prev, screen: true },
+          );
+          if (scope === 'screen') {
+            enableToolsRef.current([
+              'computer_screenshot',
+              'computer_click',
+              'computer_move',
+              'computer_scroll',
+              'computer_type',
+              'computer_key',
+            ]);
+          } else if (scope === 'admin') {
+            enableToolsRef.current(['run_command']);
+          }
+          resolve({
+            ok: true,
+            summary: '授权通过',
+            content:
+              scope === 'path'
+                ? `已获准访问 ${req.target}（仅本次会话）。`
+                : scope === 'admin'
+                  ? '已获准提权（仅本次会话）。注意：每条 elevated 命令仍会单独弹确认，系统还会再弹一次 UAC 由用户亲自放行。'
+                  : '已获准控制屏幕（仅本次会话）。动手之前先 computer_screenshot 看清楚，不要凭记忆点击。',
+          });
+        },
+      });
+    });
+  }, []);
+
+  const revokeGrants = React.useCallback(() => {
+    setGrants({ extraRoots: [], admin: false, screen: false });
+    toast.show('已撤销本次会话的全部额外授权');
+  }, [toast]);
+
   const clearProfileHealth = React.useCallback(() => {
     if (!profile) return;
     setSettings((prev) =>
@@ -587,7 +719,8 @@ export default function App() {
         history,
         autoRetry: settings.autoRetry ?? 2,
         profileName: profile.name,
-        toolCtx: toolContextOf(settings, conv.projectId ?? null),
+        // 传函数而不是快照：中途拿到的授权要对后面的工具调用立刻生效
+        toolCtx: () => toolContextOf(settings, conv.projectId ?? null, grantsRef.current),
         effortMappings: settings.effortMappings,
         extraSystem: [
           projectSystemBlock(projects.find((p) => p.id === conv.projectId) ?? null),
@@ -597,7 +730,18 @@ export default function App() {
           .join('\n\n'),
         timeoutMs: settings.requestTimeoutMs,
         canRunHostTools,
+        grantAccess,
         confirm: (step) => {
+          // 这两类永远要人点头，连「全部放行」都不例外：
+          //   - 提权：它越过的是工作目录白名单之外的一切
+          //   - 权限申请：一个「一律放行」的档位如果连「要不要给权限」都替人答了，
+          //     那这个档位就等于把授权体系整个关掉
+          const args = (step.args ?? {}) as Record<string, unknown>;
+          const alwaysAsk =
+            step.name === 'request_access' || (step.name === 'run_command' && Boolean(args.elevated));
+          if (alwaysAsk) {
+            return new Promise<boolean>((resolve) => setConfirmReq({ step, resolve }));
+          }
           if (cfg.approvalMode === 'all') return Promise.resolve(true);
           if (cfg.approvalMode === 'auto') {
             const def = TOOL_BY_NAME[step.name];
@@ -832,6 +976,25 @@ export default function App() {
       )
     : [];
 
+  /** 已生效的额外授权：一直显示在输入框上方，不让人忘了自己给过什么 */
+  const grantBanner =
+    grants.admin || grants.screen || grants.extraRoots.length ? (
+      <div className="grant-banner">
+        <span className="grant-banner-label">本次会话已授权</span>
+        {grants.screen ? <span className="grant-chip">🖥 屏幕控制</span> : null}
+        {grants.admin ? <span className="grant-chip">🛡 管理员执行</span> : null}
+        {grants.extraRoots.map((r) => (
+          <span key={r} className="grant-chip" title={r}>
+            📂 {r.split(/[\\/]/).filter(Boolean).slice(-1)[0] || r}
+          </span>
+        ))}
+        <span style={{ flex: 1 }} />
+        <button className="btn sm" onClick={revokeGrants}>
+          全部撤销
+        </button>
+      </div>
+    ) : null;
+
   const composer = (
     <Composer
       busy={Boolean(busy)}
@@ -993,7 +1156,10 @@ export default function App() {
             <p className="hero-sub">
               会自己联网查证、读你本地的文件、翻 Chrome 里的页面，答案里带可点的来源编号。
             </p>
-            <div className="hero-box">{composer}</div>
+            <div className="hero-box">
+              {grantBanner}
+              {composer}
+            </div>
             <div className="hero-examples">
               {EXAMPLES.map((e) => (
                 <button key={e} className="example-chip" onClick={() => void send(e)}>
@@ -1044,6 +1210,7 @@ export default function App() {
                 ))}
               </div>
             </div>
+            {grantBanner}
             {composer}
           </>
         )}
@@ -1161,6 +1328,16 @@ export default function App() {
           onResolve={(ok) => {
             confirmReq.resolve(ok);
             setConfirmReq(null);
+          }}
+        />
+      ) : null}
+
+      {grantReq ? (
+        <GrantDialog
+          req={grantReq.req}
+          onDecide={(ok) => {
+            grantReq.resolve(ok);
+            setGrantReq(null);
           }}
         />
       ) : null}

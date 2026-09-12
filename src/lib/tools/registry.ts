@@ -8,7 +8,16 @@
  * 加一个新工具 = 在 TOOLS 里加一条 + 在 electron/tools/index.cjs 里加一个执行器。
  * ------------------------------------------------------------------ */
 
-export type ToolGroup = 'web' | 'files' | 'shell' | 'chrome' | 'github' | 'agent' | 'project';
+export type ToolGroup =
+  | 'web'
+  | 'files'
+  | 'shell'
+  | 'chrome'
+  | 'github'
+  | 'agent'
+  | 'project'
+  | 'computer'
+  | 'access';
 
 export interface JsonSchema {
   type: 'object';
@@ -221,10 +230,148 @@ export const TOOLS: ToolDef[] = [
         command: { type: 'string', description: '完整命令行' },
         cwd: { type: 'string', description: '工作目录，默认第一个工作目录' },
         timeout_ms: { type: 'integer', description: '超时毫秒，默认 120000' },
+        elevated: {
+          type: 'boolean',
+          description:
+            '以管理员身份执行（仅 Windows）。需要先通过 request_access 拿到 admin 授权；' +
+            '执行时系统还会弹一次 UAC 由用户亲自确认。只在确实需要管理员权限时用，' +
+            '比如改系统服务、写 Program Files。',
+        },
       },
       required: ['command'],
     },
-    summarize: (a) => `执行 ${clip(a.command, 60)}`,
+    summarize: (a) => `${a.elevated ? '【管理员】' : ''}执行 ${clip(a.command, 60)}`,
+  },
+
+
+  /* ---------------- 权限申请 ---------------- */
+  {
+    name: 'request_access',
+    label: '申请权限',
+    group: 'access',
+    dangerous: true,
+    description:
+      '向用户申请一项这次会话里还没有的权限。用户会看到你申请的范围和理由，同意之后授权在**本次会话内**有效，' +
+      '关掉应用就没了。\n' +
+      'scope 取值：\n' +
+      '- "path"：把某个目录加进可访问范围（target 填绝对路径）。当前工作目录之外的文件读不到时用这个。\n' +
+      '- "admin"：允许 run_command 带 elevated=true 以管理员身份执行（仅 Windows，执行时还会弹 UAC）。\n' +
+      '- "screen"：允许截屏和控制鼠标键盘。\n' +
+      '申请之前先想清楚：能用现有权限做到的事就别申请。理由要具体到「为了做什么」，' +
+      '写「需要更高权限」这种没有信息量的理由，用户只会拒绝。',
+    parameters: {
+      type: 'object',
+      properties: {
+        scope: { type: 'string', enum: ['path', 'admin', 'screen'], description: '申请哪一类权限' },
+        target: { type: 'string', description: 'scope="path" 时填绝对路径，其余留空' },
+        reason: { type: 'string', description: '为什么需要它，具体说明你要用它做什么' },
+      },
+      required: ['scope', 'reason'],
+    },
+    summarize: (a) =>
+      `申请权限：${
+        a.scope === 'path' ? `访问 ${clip(a.target, 40)}` : a.scope === 'admin' ? '管理员' : '屏幕控制'
+      }`,
+  },
+
+  /* ---------------- 屏幕控制 ---------------- */
+  {
+    name: 'computer_screenshot',
+    label: '截屏',
+    group: 'computer',
+    needsHost: true,
+    description:
+      '截取主屏幕，图片会作为下一条消息发给你。先截图看清楚再动手，不要凭记忆点击。' +
+      '返回里会说明图片和真实屏幕的坐标换算比例。需要 screen 授权。',
+    parameters: { type: 'object', properties: {} },
+    summarize: () => '截屏',
+  },
+  {
+    name: 'computer_click',
+    label: '点击',
+    group: 'computer',
+    needsHost: true,
+    dangerous: true,
+    description:
+      '在屏幕坐标处点击鼠标。坐标是**物理像素**，按最近一次截图里说明的比例换算。' +
+      '点完会返回当前前台窗口标题，用来确认点对了没有。需要 screen 授权。',
+    parameters: {
+      type: 'object',
+      properties: {
+        x: { type: 'integer', description: '横坐标（物理像素）' },
+        y: { type: 'integer', description: '纵坐标（物理像素）' },
+        button: { type: 'string', enum: ['left', 'right', 'middle'], description: '默认 left' },
+        double: { type: 'boolean', description: '是否双击' },
+      },
+      required: ['x', 'y'],
+    },
+    summarize: (a) => `点击 (${a.x}, ${a.y})`,
+  },
+  {
+    name: 'computer_move',
+    label: '移动鼠标',
+    group: 'computer',
+    needsHost: true,
+    description: '把鼠标移到某个坐标但不点击，用来触发 hover。需要 screen 授权。',
+    parameters: {
+      type: 'object',
+      properties: {
+        x: { type: 'integer' },
+        y: { type: 'integer' },
+      },
+      required: ['x', 'y'],
+    },
+    summarize: (a) => `移动到 (${a.x}, ${a.y})`,
+  },
+  {
+    name: 'computer_scroll',
+    label: '滚动',
+    group: 'computer',
+    needsHost: true,
+    description: '滚轮。amount 为负向下、为正向上，一格约三行。可选 x/y 指定先把鼠标移到哪。需要 screen 授权。',
+    parameters: {
+      type: 'object',
+      properties: {
+        amount: { type: 'integer', description: '格数，负数向下。默认 -3' },
+        x: { type: 'integer' },
+        y: { type: 'integer' },
+      },
+    },
+    summarize: (a) => `滚动 ${a.amount ?? -3} 格`,
+  },
+  {
+    name: 'computer_type',
+    label: '键盘输入',
+    group: 'computer',
+    needsHost: true,
+    dangerous: true,
+    description:
+      '往当前焦点所在的地方输入文字。输入前先确认焦点在对的输入框里（截图看光标）。' +
+      '含中文时会走剪贴板粘贴，这会覆盖用户的剪贴板内容。需要 screen 授权。',
+    parameters: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: '要输入的文字，最多 4000 字' },
+        via_clipboard: { type: 'boolean', description: '强制走剪贴板' },
+      },
+      required: ['text'],
+    },
+    summarize: (a) => `输入「${clip(a.text, 30)}」`,
+  },
+  {
+    name: 'computer_key',
+    label: '按键',
+    group: 'computer',
+    needsHost: true,
+    dangerous: true,
+    description:
+      '按下一个键或组合键，例如 "enter"、"ctrl+s"、"alt+tab"、"ctrl+shift+p"。需要 screen 授权。',
+    parameters: {
+      type: 'object',
+      properties: { key: { type: 'string', description: '例如 ctrl+s' } },
+      required: ['key'],
+    },
+    summarize: (a) => `按键 ${clip(a.key, 24)}`,
   },
 
   /* ---------------- Chrome ---------------- */
@@ -473,6 +620,9 @@ export const DEFAULT_ENABLED_TOOLS = [
   'chrome_tabs',
   'chrome_read_page',
   'github_search',
+  // 默认开着，但它自己什么也做不了 —— 只能弹一个窗问用户要权限。
+  // 不开的话模型撞到权限墙时只会反复报错，连「我需要 X 权限」都说不出口。
+  'request_access',
 ];
 
 /** 翻译成请求体里的 tools 字段 */

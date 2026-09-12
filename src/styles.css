@@ -2543,3 +2543,80 @@ kbd {
   font-size: 11px;
   color: var(--ok-fg, #15803d);
 }
+
+.picker-bad-row { display: flex; align-items: center; gap: 2px; }
+.picker-bad-row > .picker-bad-head { flex: 1; min-width: 0; }
+
+/* ---------------- 只看聊天模型 ---------------- */
+.chat-only {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 4px 0 2px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg-dim, #64748b);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.chat-only:hover { background: var(--hover); }
+.chat-only.on { color: var(--fg); }
+.chat-only .hint { margin-left: auto; font-size: 11px; }
+
+/* ---------------- 权限申请 ---------------- */
+.grant-dialog { max-width: 540px; padding: 20px 22px; }
+.grant-head { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 14px; }
+.grant-icon { font-size: 26px; line-height: 1; }
+.grant-title { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+.grant-target {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--code-bg, rgba(0, 0, 0, 0.06));
+  word-break: break-all;
+  font-size: 12px;
+}
+.grant-block { margin-bottom: 12px; line-height: 1.7; font-size: 13px; }
+.grant-block.warn {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--danger-border, rgba(220, 38, 38, 0.3));
+  background: var(--danger-bg, rgba(220, 38, 38, 0.06));
+}
+.grant-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-faint, #94a3b8);
+  margin-bottom: 3px;
+}
+.grant-reason { white-space: pre-wrap; }
+.grant-foot { display: flex; align-items: center; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+
+/* 已生效授权的常驻提示条 */
+.grant-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0 auto 8px;
+  padding: 6px 10px;
+  max-width: var(--content-w, 760px);
+  border-radius: 8px;
+  border: 1px solid var(--warn-border, rgba(234, 179, 8, 0.4));
+  background: var(--warn-bg, rgba(234, 179, 8, 0.1));
+  font-size: 12px;
+}
+.grant-banner-label { font-weight: 600; opacity: 0.8; }
+.grant-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg, #fff);
+  border: 1px solid var(--border);
+}
