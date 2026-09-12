@@ -1,4 +1,5 @@
 import type { EffortLevel, EffortMapping } from './lib/effort';
+import type { LearnedLimit } from './lib/limits';
 
 /* ------------------------------------------------------------------ *
  * 全局数据模型
@@ -157,6 +158,11 @@ export interface ChatMessage {
   errorInfo?: ErrorInfo;
   /** 生成过程中的临时提示（限流重试倒计时之类），成功后清掉 */
   notice?: string;
+  /**
+   * 上游给的 finish_reason。不是 stop 一类的正常值时界面会标出来 ——
+   * 「怎么答到一半就没了」这个问题，答案就在这个字段里。
+   */
+  stopReason?: string;
   usage?: Usage;
   model?: string;
   elapsedMs?: number;
@@ -250,6 +256,15 @@ export interface AppSettings {
   autoRetry: number;
   /** 技能与本地文件夹的双向同步 */
   skillSync: SkillSyncConfig;
+  /** 配置结构版本，用来跑一次性迁移。当前是 2 */
+  schemaVersion?: number;
+  /** 记住的授权，没有就是从来没记过（或者已经被撤销 / 过期清掉了） */
+  rememberedGrants?: RememberedGrants;
+  /**
+   * 从上游报错里学到的窗口大小，键是 `${profileId}::${model}`。
+   * 内置对照表永远会缺你正在用的那条路由，所以这里只记实际撞出来的。
+   */
+  modelLimits?: Record<string, LearnedLimit>;
 }
 
 export interface SkillSyncConfig {
@@ -261,16 +276,39 @@ export interface SkillSyncConfig {
 
 /* ---------------- 传输层协议 ---------------- */
 
+/** 这一轮为什么结束 —— 上游的 finish_reason 归一化之后的样子 */
+export interface StopInfo {
+  /** 上游原文，没给就是 null（通常意味着流被掐了） */
+  reason: string | null;
+  /** 收到分片但没等到函数名、因而被丢掉的工具调用个数 */
+  droppedCalls: number;
+}
+
 export interface ChatStreamHandlers {
   onContent(delta: string): void;
   onReasoning(delta: string): void;
   onToolCalls(calls: ToolCall[]): void;
   onUsage(usage: Usage): void;
+  /** 可选：不关心为什么停的调用方可以不实现 */
+  onStop?(info: StopInfo): void;
+  /**
+   * 因为避让限流而要等一会儿。放在 handlers 里而不是 init 里 ——
+   * init 要过 IPC，函数过不去。
+   */
+  onPaceWait?(ms: number): void;
   onDone(): void;
   /** status 是上游的 HTTP 状态码，拿不到时为 undefined（网络层直接挂了） */
   onError(message: string, status?: number): void;
 }
 
+/**
+ * @cloneable
+ *
+ * ⚠ 这个对象会被原样送过 Electron 的 IPC（structuredClone）。
+ * **只能放能被结构化克隆的东西** —— 放一个函数进来，整条请求会在 0.0 秒
+ * 直接失败并报 "An object could not be cloned."，而且一个字节都没发出去。
+ * 回调一律放 ChatStreamHandlers，那个对象留在渲染进程里，不过 IPC。
+ */
 export interface ChatRequestInit {
   requestId: string;
   url: string;
@@ -278,6 +316,16 @@ export interface ChatRequestInit {
   body: unknown;
   stream: boolean;
   timeoutMs: number;
+  /**
+   * 限流节奏按这个键分组，通常是凭据 id —— 配额是按 key 算的，不是按地址。
+   * 不传就退回用地址分组，总比不分组强。
+   */
+  paceKey?: string;
+  /**
+   * 这一次至少隔这么久再发，即使当前节奏更快。
+   * 排查用它把自己放慢到「不可能触发限流」的程度 —— 这样收到的限流才是证据。
+   */
+  paceMinMs?: number;
 }
 
 export interface ToolResult {
@@ -310,6 +358,17 @@ export interface SessionGrants {
   admin: boolean;
   /** 允许截屏和控制鼠标键盘 */
   screen: boolean;
+}
+
+/**
+ * 跨重启记住的授权。只记目录和屏幕，**不记提权** —— 见 GrantDialog 的说明。
+ * 带过期时间：没有期限的授权就是没人管的授权。
+ */
+export interface RememberedGrants {
+  extraRoots: string[];
+  screen: boolean;
+  /** Unix 毫秒。到点之后整份作废，重新申请 */
+  expiresAt: number;
 }
 
 export interface AccessRequest {

@@ -164,12 +164,21 @@ export const PARAM_DEFS: ParamDef[] = [
 
 export const PARAM_GROUPS: ParamDef['group'][] = ['采样', '长度', '惩罚', '其他'];
 
-/** 默认全部关闭 —— 关闭 = 该字段根本不出现在请求体里，走服务端默认值 */
+/**
+ * 默认全部关闭 —— 关闭 = 该字段根本不出现在请求体里，走服务端默认值。
+ *
+ * max_tokens 以前默认开着（4096）。那意味着**每一次请求都自带一个输出天花板**，
+ * 而这个天花板既不是模型的、也不是用户挑的，是这行代码替人定的。长文、长代码、
+ * 长思考全都会在那个数字上被切断，现象是「答到一半没了」，原因却藏在一个
+ * 没人动过的默认值里。
+ *
+ * 现在默认不发：上游自己知道它最多能输出多少，那个数字永远比我们猜的准。
+ */
 export function defaultParams(): Record<string, ParamState> {
   const out: Record<string, ParamState> = {};
   for (const d of PARAM_DEFS) {
     out[d.key] = {
-      enabled: d.key === 'temperature' || d.key === 'max_tokens',
+      enabled: d.key === 'temperature',
       value: d.default,
     };
   }
@@ -242,6 +251,8 @@ export function buildRequestBody(
   messages: WireMessage[],
   toolNames: string[] = [],
   effortMappings: EffortMapping[] = [],
+  /** 这次请求还剩多少窗口 —— 思考预算按它夹一下，见 effort.ts 的说明 */
+  roomLeft: number | null = null,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: cfg.model,
@@ -278,7 +289,7 @@ export function buildRequestBody(
   switch (cfg.thinkingStyle) {
     case 'auto':
       // 五级刻度 → 按当前模型匹配到的厂商写法翻译
-      Object.assign(body, effortFields(cfg.model, cfg.effortLevel, effortMappings));
+      Object.assign(body, effortFields(cfg.model, cfg.effortLevel, effortMappings, roomLeft));
       break;
     case 'reasoning_effort':
       body.reasoning_effort = cfg.reasoningEffort;

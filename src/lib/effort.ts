@@ -159,11 +159,54 @@ export function matchMapping(model: string, mappings: EffortMapping[]): EffortMa
   return null;
 }
 
+/* ------------------------------------------------------------------ *
+ * 强度 ≠ 预算
+ *
+ * 用户的原话：「reasoning effort 不应该绑定预算」。这条批评是对的。
+ *
+ * 「多想一会儿」是个意图，"12288 tokens" 是一个会过期的实现细节：换条路由、
+ * 上下文长一点，同一个数字就从「想得深」变成「400」。OpenAI 系那边本来就
+ * 只发 low/medium/high 三个词，没有这个问题；出问题的是 anthropic / qwen
+ * 这类**必须填一个数字**的接口。
+ *
+ * 所以数字不再是写死的常量，而是**在发请求那一刻按剩余窗口算出来的**：
+ * 五级刻度只决定「占剩余空间的几成」，具体数字交给 clampBudget。
+ * 表里那些默认值退化成「不知道窗口时的兜底」。
+ * ------------------------------------------------------------------ */
+
+/** 每一级想占用「剩余可用空间」的比例 */
+const BUDGET_SHARE: Record<Exclude<EffortLevel, 'off'>, number> = {
+  low: 0.05,
+  medium: 0.15,
+  high: 0.35,
+  xhigh: 0.55,
+  max: 0.8,
+};
+
+/**
+ * 把一个思考预算夹到这次请求真的放得下的范围里。
+ *
+ * roomLeft = 这条路由的窗口 − 已经占掉的输入。不知道窗口就返回原值 ——
+ * 猜一个窗口去压，比不压更容易压错。
+ */
+export function clampBudget(
+  want: number,
+  level: Exclude<EffortLevel, 'off'>,
+  roomLeft: number | null,
+): number {
+  if (!roomLeft || roomLeft <= 0) return want;
+  const byShare = Math.floor(roomLeft * BUDGET_SHARE[level]);
+  // 至少留 256，不然「开了思考但一个 token 都不给」比不开还糟
+  return Math.max(256, Math.min(want, byShare));
+}
+
 /** 把「五级刻度 + 当前模型」翻译成要合并进请求体的字段 */
 export function effortFields(
   model: string,
   level: EffortLevel,
   mappings: EffortMapping[],
+  /** 这次请求还剩多少窗口可用；不知道就不传 */
+  roomLeft: number | null = null,
 ): Record<string, unknown> {
   if (level === 'off') return {};
 
@@ -179,12 +222,12 @@ export function effortFields(
     case 'anthropic': {
       const n = Number(raw);
       if (!Number.isFinite(n) || n <= 0) return {};
-      return { thinking: { type: 'enabled', budget_tokens: n } };
+      return { thinking: { type: 'enabled', budget_tokens: clampBudget(n, level, roomLeft) } };
     }
     case 'qwen': {
       const n = Number(raw);
       if (!Number.isFinite(n) || n <= 0) return {};
-      return { enable_thinking: true, thinking_budget: n };
+      return { enable_thinking: true, thinking_budget: clampBudget(n, level, roomLeft) };
     }
     case 'custom':
       try {

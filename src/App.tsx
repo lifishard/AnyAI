@@ -15,7 +15,10 @@ import type {
   ToolResult,
   ToolStep,
 } from './types';
-import { SEED_MODELS, fetchModels, previewBody } from './lib/api';
+import { SEED_MODELS, buildHeaders, endpoint, fetchModels, previewBody } from './lib/api';
+import { PROBE_SPACING_MS, probe400, type ProbeStep } from './lib/probe400';
+import { formatExchange } from './lib/wiretap';
+import { limitKey } from './lib/limits';
 import { runAgent, type AgentHandle } from './lib/agent';
 import {
   clearHealth,
@@ -60,7 +63,7 @@ import ArtifactPanel from './components/ArtifactPanel';
 import Resizer from './components/Resizer';
 import ErrorBoundary from './components/ErrorBoundary';
 import ToolConfirm from './components/ToolConfirm';
-import GrantDialog from './components/GrantDialog';
+import GrantDialog, { REMEMBER_DAYS } from './components/GrantDialog';
 import WorkspaceDialog from './components/WorkspaceDialog';
 import { Modal, Toast, useToast } from './components/ui';
 
@@ -113,9 +116,14 @@ export default function App() {
   const grantsRef = React.useRef(grants);
   grantsRef.current = grants;
 
+  // 跑到一半时要现读设置（学到的窗口大小会在这次提问过程中被写进去），
+  // 闭包里那份快照是开跑那一刻的，读它等于永远慢一拍
+  const settingsRef = React.useRef(settings);
+  settingsRef.current = settings;
+
   const [grantReq, setGrantReq] = React.useState<{
     req: AccessRequest;
-    resolve: (ok: boolean) => void;
+    resolve: (ok: boolean, remember?: boolean) => void;
   } | null>(null);
 
   const [projects, setProjects] = React.useState<Project[]>([]);
@@ -154,6 +162,15 @@ export default function App() {
       setTasks(tk);
       setActiveId(c.length ? [...c].sort((a, b) => b.updatedAt - a.updatedAt)[0].id : null);
       setRemoteConfig(s.remote);
+      // 记住过的授权在这里回填。过期的那份 loadSettings 已经丢掉了，
+      // 所以这里拿到什么就是什么，不用再判一次时间
+      if (s.rememberedGrants) {
+        setGrants({
+          extraRoots: s.rememberedGrants.extraRoots,
+          screen: s.rememberedGrants.screen,
+          admin: false, // 提权永远不跨重启
+        });
+      }
       const bridge = desktop();
       if (bridge) {
         const i = await bridge.info();
@@ -402,6 +419,20 @@ export default function App() {
     if (!cur) return;
     const next = Array.from(new Set([...(cur.enabledTools ?? []), ...names]));
     setConfig({ toolsEnabled: true, enabledTools: next });
+    // 同时写进「新会话默认」。只改当前会话的话，下次开个新对话这些工具
+    // 又没了 —— 人明明已经点过同意，却要为每条对话重新点一遍
+    setSettings((s) =>
+      s
+        ? {
+            ...s,
+            defaultConfig: {
+              ...s.defaultConfig,
+              toolsEnabled: true,
+              enabledTools: Array.from(new Set([...(s.defaultConfig.enabledTools ?? []), ...names])),
+            },
+          }
+        : s,
+    );
   }
   const enableToolsRef = React.useRef(enableToolsNow);
   enableToolsRef.current = enableToolsNow;
@@ -575,7 +606,7 @@ export default function App() {
     return new Promise<ToolResult>((resolve) => {
       setGrantReq({
         req,
-        resolve: (okGranted) => {
+        resolve: (okGranted, remember) => {
           if (!okGranted) {
             resolve({
               ok: false,
@@ -593,6 +624,26 @@ export default function App() {
                 ? { ...prev, admin: true }
                 : { ...prev, screen: true },
           );
+          // 选了记住就落进设置，重启（以及每次更新）之后还在。
+          // admin 不在此列 —— GrantDialog 压根不给它这个按钮
+          if (remember && scope !== 'admin') {
+            setSettings((prev) => {
+              if (!prev) return prev;
+              const cur = prev.rememberedGrants;
+              const alive = cur && cur.expiresAt > Date.now() ? cur : null;
+              return {
+                ...prev,
+                rememberedGrants: {
+                  extraRoots:
+                    scope === 'path'
+                      ? Array.from(new Set([...(alive?.extraRoots ?? []), req.target as string]))
+                      : (alive?.extraRoots ?? []),
+                  screen: scope === 'screen' ? true : Boolean(alive?.screen),
+                  expiresAt: Date.now() + REMEMBER_DAYS * 24 * 60 * 60 * 1000,
+                },
+              };
+            });
+          }
           if (scope === 'screen') {
             enableToolsRef.current([
               'computer_screenshot',
@@ -605,24 +656,128 @@ export default function App() {
           } else if (scope === 'admin') {
             enableToolsRef.current(['run_command']);
           }
+          // 有效期照实说。之前一律写「仅本次会话」，现在能记住了，
+          // 再这么说就是在骗模型 —— 它会因此以为下一轮还得重新申请
+          const span = remember && scope !== 'admin' ? `${REMEMBER_DAYS} 天内有效` : '仅本次会话';
           resolve({
             ok: true,
             summary: '授权通过',
             content:
               scope === 'path'
-                ? `已获准访问 ${req.target}（仅本次会话）。`
+                ? `已获准访问 ${req.target}（${span}）。`
                 : scope === 'admin'
                   ? '已获准提权（仅本次会话）。注意：每条 elevated 命令仍会单独弹确认，系统还会再弹一次 UAC 由用户亲自放行。'
-                  : '已获准控制屏幕（仅本次会话）。动手之前先 computer_screenshot 看清楚，不要凭记忆点击。',
+                  : `已获准控制屏幕（${span}）。动手之前先 computer_screenshot 看清楚，不要凭记忆点击。`,
           });
         },
       });
     });
   }, []);
 
+  /**
+   * 400 自动排查。
+   *
+   * `inference request is invalid (code 400001)` 这种报错不点名任何字段，
+   * 人只能一个个去掉再试。那件事交给机器做：从最小请求体开始一层层加回去，
+   * 工具那一组再二分。十几次短请求换一个确定的答案。
+   *
+   * 注意别跟上面那个 runProbe 搞混：那个是「批量体检模型列表」，
+   * 这个是「拆解一次失败的请求」。两件事，两个名字。
+   */
+  const runRequestProbe = React.useCallback(async () => {
+    const cfg = active?.config ?? settings?.defaultConfig;
+    if (!cfg || !profile || !settings) return;
+    const apiKey = (await secretGet(profile.id)) ?? '';
+    if (!apiKey) {
+      toast.show('这份凭据还没填密钥');
+      return;
+    }
+    const usable = new Set(availableTools(canRunHostTools).map((t) => t.name));
+    const names = cfg.toolsEnabled
+      ? cfg.enabledTools.filter((n) => usable.has(n) && TOOL_BY_NAME[n])
+      : [];
+
+    const render = (steps: ProbeStep[], head: string, note?: string) =>
+      setPreview(
+        [
+          head,
+          note ?? '',
+          '',
+          ...steps.map((st) => `${st.ok ? '✓' : '✗'} ${st.label}${st.error ? `\n     ${st.error}` : ''}`),
+        ]
+          .filter((x, i) => x !== '' || i > 1)
+          .join('\n'),
+      );
+    render(
+      [],
+      `正在排查…每 ${PROBE_SPACING_MS / 1000} 秒才发一次（一条 hi、最多 1 个 token）。\n` +
+        '刻意放这么慢，是为了保证这串请求本身不可能触发限流 —— ' +
+        '这样万一真收到限流，那就是结论，而不是排查自己造出来的假象。',
+    );
+
+    const send = (body: Record<string, unknown>) =>
+      new Promise<{ ok: boolean; error?: string; status?: number }>((resolve) => {
+        let failed: string | undefined;
+        let failedStatus: number | undefined;
+        void getTransport()
+          .chat(
+            {
+              requestId: uid('probe'),
+              url: endpoint(profile.baseUrl, 'chat/completions'),
+              headers: buildHeaders(apiKey, profile),
+              body,
+              stream: false,
+              timeoutMs: 30000,
+              // 排查走同一条节奏链（跟正常对话抢的是同一份配额），
+              // 并且把自己压到比平时慢得多的节奏上。这是整个设计的支点：
+              // 只有当这串请求**在设计上就不可能**打爆配额时，
+              // 它返回的限流才是证据，而不是它自己造出来的假象。
+              paceKey: profile.id,
+              paceMinMs: PROBE_SPACING_MS,
+            },
+            {
+              onContent() {},
+              onReasoning() {},
+              onToolCalls() {},
+              onUsage() {},
+              onDone() {
+                resolve({ ok: !failed, error: failed, status: failedStatus });
+              },
+              onError(msg, status) {
+                failed = msg;
+                failedStatus = status;
+              },
+            },
+          )
+          .then(() => resolve({ ok: !failed, error: failed, status: failedStatus }))
+          .catch((e: unknown) => resolve({ ok: false, error: String(e) }));
+      });
+
+    try {
+      const rep = await probe400(cfg, names, settings.effortMappings, send, (steps, note) =>
+        render(steps, '正在排查…', note),
+      );
+      setPreview(
+        [
+          '排查结论',
+          '',
+          rep.verdict,
+          '',
+          '—— 每一步 ——',
+          ...rep.steps.map((st) => `${st.ok ? '✓' : '✗'} ${st.label}${st.error ? `\n     ${st.error}` : ''}`),
+        ].join('\n'),
+      );
+    } catch (e) {
+      setPreview(`排查本身出错了：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [active, settings, profile, canRunHostTools, toast]);
+
   const revokeGrants = React.useCallback(() => {
     setGrants({ extraRoots: [], admin: false, screen: false });
-    toast.show('已撤销本次会话的全部额外授权');
+    // 记住的那份也一起清掉 —— 「全部撤销」按下去之后还能被重启复活，
+    // 那这个按钮就是在骗人
+    setSettings((prev) => (prev ? { ...prev, rememberedGrants: undefined } : prev));
+    toast.show('已撤销全部额外授权，包括记住的那些');
   }, [toast]);
 
   const clearProfileHealth = React.useCallback(() => {
@@ -684,7 +839,10 @@ export default function App() {
       const kept =
         replaceFromIndex === undefined ? conv.messages : conv.messages.slice(0, replaceFromIndex);
 
-      // 本轮唤起的技能：固定一份快照，并记一次使用次数
+      // 本轮唤起的技能：固定一份快照，并记一次使用次数。
+      // 注意技能是**粘的** —— 发完不清空，一直注入到用户自己点掉那个 ✕。
+      // 一次性注入看着更"干净"，但技能通常是一整段工作流（先查再写再验），
+      // 第二轮开始模型就看不见规则了，表现出来就是"它好像忘了"。
       const turnSkills = activeSkills;
       if (turnSkills.length) {
         const ids = new Set(turnSkills.map((x) => x.id));
@@ -723,7 +881,6 @@ export default function App() {
       setConversations(baseList.map((c) => (c.id === convId ? nextConv : c)));
       setActiveId(convId);
       setAttachments([]);
-      setActiveSkills([]);
 
       /* --- 流式缓冲：按 60ms 节流刷进 state，不然一个 token 一次 setState --- */
       const buf = { content: '', reasoning: '', dirty: false };
@@ -751,6 +908,23 @@ export default function App() {
         // 传函数而不是快照：中途拿到的授权要对后面的工具调用立刻生效
         toolCtx: () => toolContextOf(settings, conv.projectId ?? null, grantsRef.current),
         effortMappings: settings.effortMappings,
+        // 这条路由的窗口有多大 —— 之前撞出来的那个数
+        limitOf: () => settingsRef.current?.modelLimits?.[limitKey(profile.id, cfg.model)],
+        onLearnLimit: (l) =>
+          setSettings((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  modelLimits: {
+                    ...(prev.modelLimits ?? {}),
+                    [limitKey(profile.id, cfg.model)]: {
+                      ...(prev.modelLimits?.[limitKey(profile.id, cfg.model)] ?? {}),
+                      ...l,
+                    },
+                  },
+                }
+              : prev,
+          ),
         extraSystem: [
           projectSystemBlock(projects.find((p) => p.id === conv.projectId) ?? null),
           skillSystemBlock(turnSkills),
@@ -805,6 +979,9 @@ export default function App() {
           onRound() {},
           onNotice(text) {
             patchMessage(convId, answerMsg.id, { notice: text || undefined });
+          },
+          onStopReason(reason) {
+            patchMessage(convId, answerMsg.id, { stopReason: reason ?? undefined });
           },
           onDone() {
             clearInterval(timer);
@@ -1009,7 +1186,12 @@ export default function App() {
   const grantBanner =
     grants.admin || grants.screen || grants.extraRoots.length ? (
       <div className="grant-banner">
-        <span className="grant-banner-label">本次会话已授权</span>
+        <span className="grant-banner-label">
+          已授权
+          {settings?.rememberedGrants
+            ? `（记到 ${new Date(settings.rememberedGrants.expiresAt).toLocaleDateString()}）`
+            : '（仅本次会话）'}
+        </span>
         {grants.screen ? <span className="grant-chip">🖥 屏幕控制</span> : null}
         {grants.admin ? <span className="grant-chip">🛡 管理员执行</span> : null}
         {grants.extraRoots.map((r) => (
@@ -1217,6 +1399,7 @@ export default function App() {
                         ? undefined
                         : () => void send(t.q!.content, t.qIndex)
                     }
+                    onProbe={busy ? undefined : () => void runRequestProbe()}
                     onEditQuestion={
                       busy || !t.q ? undefined : (text) => void send(text, t.qIndex)
                     }
@@ -1278,7 +1461,20 @@ export default function App() {
             addCustomModel(id);
             setConfig({ model: id });
           }}
-          onPreview={() => setPreview(previewBody(config, '这里是你输入的问题', toolNames))}
+          onPreview={() =>
+            setPreview(
+              previewBody(
+                config,
+                '这里是你输入的问题',
+                toolNames,
+                // 跟真正发出去的那份用同一个表达式拼，预览才有意义
+                [projectSystemBlock(activeProject), skillSystemBlock(activeSkills)]
+                  .filter(Boolean)
+                  .join('\n\n'),
+              ),
+            )
+          }
+          onRawDump={() => setPreview(formatExchange())}
           onSaveAsDefault={() => {
             setSettings((s) => (s ? { ...s, defaultConfig: config } : s));
             toast.show('已存为新会话的默认配置');
@@ -1336,7 +1532,7 @@ export default function App() {
       ) : null}
 
       {preview !== null ? (
-        <Modal title="将要发出的请求体" onClose={() => setPreview(null)} wide>
+        <Modal title="请求详情" onClose={() => setPreview(null)} wide>
           <div className="modal-body">
             <pre
               style={{
@@ -1366,8 +1562,8 @@ export default function App() {
       {grantReq ? (
         <GrantDialog
           req={grantReq.req}
-          onDecide={(ok) => {
-            grantReq.resolve(ok);
+          onDecide={(ok, remember) => {
+            grantReq.resolve(ok, remember);
             setGrantReq(null);
           }}
         />

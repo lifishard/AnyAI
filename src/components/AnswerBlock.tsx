@@ -2,7 +2,17 @@ import React from 'react';
 import type { Artifact, ChatMessage, ErrorInfo, SourceRef, ToolStep } from '../types';
 import { ArtifactStrip } from './ArtifactPanel';
 import { TOOL_BY_NAME } from '../lib/tools/registry';
+import { isCleanStop } from '../lib/errors';
 import Markdown from './Markdown';
+
+/** finish_reason 的人话注解，鼠标悬停时显示 */
+const STOP_HINT: Record<string, string> = {
+  length: '输出长度到顶了，这段话是被截断的，不是它说完了。把 max_tokens 调大或者让它接着写',
+  max_tokens: '输出长度到顶了，这段话是被截断的。把 max_tokens 调大或者让它接着写',
+  tool_calls: '它本来要调用工具。如果下面没有工具步骤，说明工具调用在路上丢了，重发一次',
+  function_call: '它本来要调用工具。如果下面没有工具步骤，说明工具调用在路上丢了，重发一次',
+  content_filter: '被上游的内容过滤拦下了',
+};
 
 /* ------------------------------------------------------------------ *
  * 来源卡片行（Perplexity 那条横向滚动的来源带）
@@ -71,7 +81,13 @@ const KIND_ICON: Record<string, string> = {
   unknown: '⚠',
 };
 
-function ErrorCard(props: { raw: string; info?: ErrorInfo; onRetry?: () => void }) {
+function ErrorCard(props: {
+  raw: string;
+  info?: ErrorInfo;
+  onRetry?: () => void;
+  /** 400 时的「自动排查」；不传就不显示那个按钮 */
+  onProbe?: () => void;
+}) {
   const info = props.info;
   if (!info) {
     return (
@@ -101,6 +117,16 @@ function ErrorCard(props: { raw: string; info?: ErrorInfo; onRetry?: () => void 
         {props.onRetry ? (
           <button className="btn sm primary" onClick={props.onRetry}>
             重新发送
+          </button>
+        ) : null}
+        {/* 只有「请求体被拒」这一类才值得排查：401/429/5xx 排查不出东西来 */}
+        {props.onProbe && (info.status === 400 || info.kind === 'bad_param') ? (
+          <button
+            className="btn sm"
+            onClick={props.onProbe}
+            title="从最小请求体开始，一组一组把字段加回去，第一个失败的那组就是原因。工具会用二分法定位到具体是哪几个"
+          >
+            自动排查
           </button>
         ) : null}
         <details className="err-raw">
@@ -182,6 +208,8 @@ export default function AnswerBlock(props: {
   onOpenArtifact?: (a: Artifact) => void;
   onCopy: (text: string) => void;
   onRetry?: () => void;
+  /** 400 时的「自动排查」—— 只有确实是请求体被拒时才传 */
+  onProbe?: () => void;
   onEditQuestion?: (text: string) => void;
   onFork?: () => void;
   onDelete?: () => void;
@@ -275,7 +303,12 @@ export default function AnswerBlock(props: {
       {answer?.notice ? <div className="answer-notice">{answer.notice}</div> : null}
 
       {answer?.error ? (
-        <ErrorCard raw={answer.error} info={answer.errorInfo} onRetry={props.onRetry} />
+        <ErrorCard
+          raw={answer.error}
+          info={answer.errorInfo}
+          onRetry={props.onRetry}
+          onProbe={props.onProbe}
+        />
       ) : null}
 
       {answer && !answer.error ? (
@@ -310,6 +343,11 @@ export default function AnswerBlock(props: {
           {answer.usage?.cached_tokens ? (
             <span title="提示词里命中上下文缓存的部分，这部分通常按更低的价格计费">
               缓存命中 {answer.usage.cached_tokens} tok
+            </span>
+          ) : null}
+          {answer.stopReason && !isCleanStop(answer.stopReason) ? (
+            <span className="stop-reason" title={STOP_HINT[answer.stopReason] ?? '上游给出的结束原因'}>
+              结束原因：{answer.stopReason}
             </span>
           ) : null}
           <span className="spacer" />

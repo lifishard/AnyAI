@@ -25,6 +25,8 @@ export default function ConfigPanel(props: {
   onAddModel: (id: string) => void;
   /* 上面几个现在只有历史遗留的调用还在传，面板本身不用了 */
   onPreview: () => void;
+  /** 看最近一次请求的原文 —— 猜不动的时候用它 */
+  onRawDump: () => void;
   onSaveAsDefault: () => void;
   hasKey: boolean;
   canRunHostTools: boolean;
@@ -91,16 +93,40 @@ export default function ConfigPanel(props: {
           <>
             <Field
               label={`工具调用轮次上限：${cfg.maxToolRounds}`}
-              hint="一次提问里模型最多能来回调几轮工具。到顶了会强制它用已有信息作答。旧的工具输出会被自动压缩，所以调高不会直接把上下文撑爆。"
+              hint={
+                cfg.maxToolRounds > 200
+                  ? '一次提问里模型最多能来回调几轮工具。旧的工具输出会被自动压缩，所以调高不会直接把上下文撑爆 —— ' +
+                    '但每一轮都是一次真实的 API 调用：调到几百意味着一个问题可能烧掉几百次请求，跑偏了也不会自己停。' +
+                    '建议配合「逐步确认」用，别跟「全部放行」叠在一起。'
+                  : '一次提问里模型最多能来回调几轮工具。到顶了会强制它用已有信息作答。旧的工具输出会被自动压缩，所以调高不会直接把上下文撑爆。'
+              }
             >
-              <input
-                type="range"
-                min={1}
-                max={100}
-                step={1}
-                value={cfg.maxToolRounds}
-                onChange={(e) => onChange({ maxToolRounds: Number(e.target.value) })}
-              />
+              <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <input
+                  type="range"
+                  style={{ flex: 1 }}
+                  min={1}
+                  max={1000}
+                  // 低位精细、高位粗调：1~100 那一段每 1 格有意义，
+                  // 几百之后差 5 轮跟差 1 轮没区别，但滑块得能一路拖到头
+                  step={cfg.maxToolRounds >= 100 ? 10 : 1}
+                  value={cfg.maxToolRounds}
+                  onChange={(e) => onChange({ maxToolRounds: Number(e.target.value) })}
+                />
+                {/* 滑块拖到精确值很难，所以再给一个能直接敲数字的框 */}
+                <input
+                  type="number"
+                  style={{ width: 78 }}
+                  min={1}
+                  max={1000}
+                  value={cfg.maxToolRounds}
+                  onChange={(e) =>
+                    onChange({
+                      maxToolRounds: Math.max(1, Math.min(1000, Number(e.target.value) || 1)),
+                    })
+                  }
+                />
+              </div>
             </Field>
 
             {!props.canRunHostTools ? (
@@ -303,6 +329,14 @@ export default function ConfigPanel(props: {
                   </div>
                 );
               })}
+              {/* 输出上限是最容易被误伤的一个：开着它，长回答会在这个数字上
+                  被切断，而现象（答到一半没了）离原因（这个勾）太远 */}
+              {group === '长度' && cfg.params.max_tokens?.enabled ? (
+                <div className="hint" style={{ marginTop: 4 }}>
+                  ⚠ 开着 max_tokens = 单轮输出被 {String(cfg.params.max_tokens.value)} token
+                  封顶，长回答会在这里被切断。取消勾选就交给上游用它自己的最大值。
+                </div>
+              ) : null}
             </div>
           );
         })}
@@ -338,6 +372,17 @@ export default function ConfigPanel(props: {
         </button>
         <button className="btn sm" onClick={props.onSaveAsDefault} style={{ flex: 1 }}>
           存为新会话默认
+        </button>
+      </div>
+
+      <div className="row" style={{ gap: 8 }}>
+        <button
+          className="btn sm"
+          onClick={props.onRawDump}
+          style={{ flex: 1 }}
+          title="最近一次请求实际发出去的内容，和上游一个字节都没改的回复原文。模型「说要调工具然后没动静」时，答案就在这里面"
+        >
+          最近一次原始往返
         </button>
       </div>
     </div>

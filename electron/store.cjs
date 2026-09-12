@@ -39,11 +39,40 @@ function migrateFromLegacy(target) {
   }
 }
 
+/**
+ * Chrome 那份独立配置（登录状态就在里面）也要跟着搬。
+ *
+ * 不搬的话现象是：更新一次，工具里的浏览器就退成了未登录，所有需要登录态
+ * 的页面全都读不了 —— 而用户完全不会把「应用更新」和「浏览器退登」联系起来。
+ *
+ * 用 rename 而不是拷贝：同一个卷上是原子的、瞬间完成；这个目录动辄几百兆，
+ * 拷贝会让启动卡住好几秒。跨卷失败就放弃，不值得为它阻塞启动。
+ */
+function migrateChromeProfile(userDataDir) {
+  const target = path.join(userDataDir, 'chrome-profile');
+  if (fs.existsSync(target)) return;
+  const parent = path.dirname(userDataDir);
+  for (const name of LEGACY_DIRS) {
+    const candidate = path.join(parent, name, 'chrome-profile');
+    try {
+      if (!fs.existsSync(candidate)) continue;
+      fs.mkdirSync(userDataDir, { recursive: true });
+      fs.renameSync(candidate, target);
+      console.log(`[store] 已搬迁 Chrome 配置（含登录态）：${candidate} → ${target}`);
+      return;
+    } catch (err) {
+      console.error('[store] Chrome 配置搬迁失败（登录态可能需要重新登录）:', err);
+    }
+  }
+}
+
 function file() {
   if (!filePath) {
-    filePath = path.join(app.getPath('userData'), 'store.json');
+    const dir = app.getPath('userData');
+    filePath = path.join(dir, 'store.json');
     try {
       migrateFromLegacy(filePath);
+      migrateChromeProfile(dir);
     } catch (err) {
       console.error('[store] 迁移检查失败:', err);
     }

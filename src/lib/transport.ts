@@ -14,6 +14,8 @@ import {
   extractErrorMessage,
   type ToolCallDelta,
 } from './sse';
+import { beginExchange, recordRaw } from './wiretap';
+import { isRateLimited, noteRateLimit, noteSuccess, paced } from './pacer';
 
 /* ================================================================== *
  * 原生桥接的协议
@@ -206,21 +208,79 @@ async function callRemoteTool(
  * 事件流 → handlers 的公共接线
  * ------------------------------------------------------------------ */
 
-function wireHandlers(h: ChatStreamHandlers) {
+/**
+ * 所有出站请求都从这里过，所以限流的账也记在这里 —— 分散到各个调用点去记，
+ * 迟早会有一条路漏掉，而漏掉的那条正是把配额打爆的那条。
+ */
+/**
+ * 过 IPC 之前把请求描述削成「一定能被结构化克隆」的样子。
+ *
+ * 这是一次真实事故的产物：给 ChatRequestInit 加了一个 onPaceWait 回调，
+ * 它跟着 ipcRenderer.invoke 一起走，于是每一条请求都在 0.0 秒炸成
+ * "An object could not be cloned."，一个字节都没发出去。类型系统拦不住
+ * 这个 —— 函数在 TS 看来是完全合法的属性。
+ *
+ * 所以这里**白名单**而不是黑名单：只有明确列出来的字段能过去。
+ * 以后再往 init 上加任何东西，不改这里就传不过去 —— 传不过去比悄悄炸掉好。
+ */
+export function cloneable(init: ChatRequestInit): ChatRequestInit {
+  return {
+    requestId: init.requestId,
+    url: init.url,
+    headers: init.headers,
+    body: init.body,
+    stream: init.stream,
+    timeoutMs: init.timeoutMs,
+  };
+}
+
+function paceKeyOf(init: ChatRequestInit): string {
+  if (init.paceKey) return init.paceKey;
+  try {
+    return new URL(init.url).host;
+  } catch {
+    return init.url;
+  }
+}
+
+function wireHandlers(h: ChatStreamHandlers, init?: ChatRequestInit) {
+  if (init) beginExchange({ url: init.url, body: init.body, stream: init.stream });
   const acc = createToolCallAccumulator();
+  // 最后一个 finish_reason 说了算：多 choice 或带 usage 的收尾包可能各带一个
+  let stopReason: string | null = null;
   const consumer = createStreamConsumer({
     onContent: (s) => h.onContent(s),
     onReasoning: (s) => h.onReasoning(s),
     onToolCallDelta: (d: ToolCallDelta[]) => acc.feed(d),
     onUsage: (u) => h.onUsage(u),
+    onFinishReason: (r) => {
+      stopReason = r;
+    },
   });
 
   return {
-    consumer,
+    // 原文在解析之前先留一份 —— 解析器只会告诉你它看懂了什么，
+    // 而这个问题恰恰出在「它没看懂的那部分」上
+    consumer: {
+      chunk(t: string) {
+        recordRaw(t);
+        consumer.chunk(t);
+      },
+      body(t: string) {
+        recordRaw(t);
+        consumer.body(t);
+      },
+      end() {
+        consumer.end();
+      },
+    },
     finish() {
       consumer.end();
       const calls = acc.result();
       if (calls.length) h.onToolCalls(calls);
+      // 先报「为什么停」再报 onDone —— 上层要先拿到原因才能决定这轮算不算结束
+      h.onStop?.({ reason: stopReason, droppedCalls: acc.droppedCount() });
+      if (init) noteSuccess(paceKeyOf(init));
       h.onDone();
     },
   };
@@ -240,7 +300,7 @@ class ElectronTransport implements Transport {
 
   chat(init: ChatRequestInit, h: ChatStreamHandlers): Promise<void> {
     return new Promise<void>((resolve) => {
-      const { consumer, finish } = wireHandlers(h);
+      const { consumer, finish } = wireHandlers(h, init);
       let settled = false;
 
       const off = this.bridge.onEvent((e) => {
@@ -269,7 +329,7 @@ class ElectronTransport implements Transport {
         }
       });
 
-      this.bridge.chat(init).catch((err: unknown) => {
+      this.bridge.chat(cloneable(init)).catch((err: unknown) => {
         if (settled) return;
         settled = true;
         off();
@@ -316,7 +376,7 @@ class CapacitorTransport implements Transport {
   kind = 'capacitor' as const;
 
   async chat(init: ChatRequestInit, h: ChatStreamHandlers): Promise<void> {
-    const { consumer, finish } = wireHandlers(h);
+    const { consumer, finish } = wireHandlers(h, init);
     let settled = false;
 
     const handle = await SncHttp.addListener('sncHttpEvent', (e) => {
@@ -465,7 +525,7 @@ class WebTransport implements Transport {
   private controllers = new Map<string, AbortController>();
 
   async chat(init: ChatRequestInit, h: ChatStreamHandlers): Promise<void> {
-    const { consumer, finish } = wireHandlers(h);
+    const { consumer, finish } = wireHandlers(h, init);
     const ctrl = new AbortController();
     this.controllers.set(init.requestId, ctrl);
     const timer = setTimeout(() => ctrl.abort(), init.timeoutMs);
@@ -573,14 +633,56 @@ class WebTransport implements Transport {
 
 let cached: Transport | null = null;
 
+/**
+ * 给任意一个 transport 套上发送节奏控制。
+ *
+ * 套在**最外层**而不是塞进三个 chat() 实现里：三份实现就是三次机会漏掉，
+ * 而漏掉的那条恰好就是把配额打爆的那条。这里是唯一的出口，套一次全都算数。
+ *
+ * 限流的账也在这里记 —— onError 被包了一层，不管哪个平台、哪条代码路径
+ * 报的错，都会经过同一个判断。
+ */
+function withPacing(t: Transport): Transport {
+  const originalChat = t.chat.bind(t);
+  t.chat = (init: ChatRequestInit, h: ChatStreamHandlers) => {
+    const key = paceKeyOf(init);
+    const wrapped: ChatStreamHandlers = {
+      ...h,
+      onError(message, status) {
+        if (isRateLimited(message, status)) {
+          const next = noteRateLimit(key, parseRetryAfterMs(message));
+          console.info(`[pacer] ${key} 撞到限流，发送间隔调到 ${next}ms`);
+        }
+        h.onError(message, status);
+      },
+    };
+    return paced(key, () => originalChat(init, wrapped), {
+      onWait: h.onPaceWait?.bind(h),
+      minIntervalMs: init.paceMinMs,
+      // 用户按了停止就不该还在这儿排队等着
+      aborted: () => false,
+    });
+  };
+  return t;
+}
+
+/** 上游说了等多久就等多久 —— 它比我们自己算的准 */
+function parseRetryAfterMs(msg: string): number | undefined {
+  const m = msg.match(/retry[-_ ]?after[^\d]{0,8}(\d+(?:\.\d+)?)\s*(ms|s|秒)?/i);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return undefined;
+  return m[2] === 'ms' ? n : n * 1000;
+}
+
 export function getTransport(): Transport {
   if (cached) return cached;
   if (typeof window !== 'undefined' && window.snc?.platform === 'electron') {
-    cached = new ElectronTransport(window.snc);
+    cached = withPacing(new ElectronTransport(window.snc));
   } else if (Capacitor.isNativePlatform()) {
-    cached = new CapacitorTransport();
+    cached = withPacing(new CapacitorTransport());
   } else {
-    cached = new WebTransport();
+    cached = withPacing(new WebTransport());
   }
   return cached;
 }

@@ -13,7 +13,13 @@ export interface NormalizedDelta {
   reasoning: string;
   toolCalls: ToolCallDelta[];
   usage?: Usage;
-  finished: boolean;
+  /**
+   * 上游给的 finish_reason 原文，没给就是 null。
+   * 这个值是「为什么停」的唯一线索：stop 是正常收尾，length 是被 max_tokens
+   * 砍了，tool_calls 是它要调工具，content_filter 是被拦了。null 则通常意味着
+   * 流被掐断 —— 这几种情况在界面上必须长得不一样，否则全都表现为「答完了」。
+   */
+  finishReason: string | null;
 }
 
 /**
@@ -127,7 +133,7 @@ function pickToolCalls(holder: Record<string, unknown>): ToolCallDelta[] {
  *  3. 日日新原生     { data: { choices:[{ delta:"..." }], usage } }
  */
 export function normalizeDelta(input: unknown): NormalizedDelta {
-  const out: NormalizedDelta = { content: '', reasoning: '', toolCalls: [], finished: false };
+  const out: NormalizedDelta = { content: '', reasoning: '', toolCalls: [], finishReason: null };
   if (!input || typeof input !== 'object') return out;
 
   let root = input as Record<string, unknown>;
@@ -142,9 +148,9 @@ export function normalizeDelta(input: unknown): NormalizedDelta {
   if (!Array.isArray(choices) || choices.length === 0) return out;
 
   const c = choices[0] as Record<string, unknown>;
-  if (c.finish_reason !== undefined && c.finish_reason !== null && c.finish_reason !== '') {
-    out.finished = true;
-  }
+  // 字段名各家不一样：OpenAI 是 finish_reason，Anthropic 兼容层常写 stop_reason
+  const fr = c.finish_reason ?? c.stop_reason ?? c.finishReason;
+  if (typeof fr === 'string' && fr) out.finishReason = fr;
 
   const holder = (c.delta ?? c.message ?? {}) as unknown;
 
@@ -192,6 +198,16 @@ export function createToolCallAccumulator() {
         }))
         .filter((c) => Boolean(c.name));
     },
+    /**
+     * 收到了分片、但始终没等到函数名的那几个 —— 它们会被 result() 过滤掉。
+     * 数出来是为了让上层能说「有 N 个工具调用没传完」，而不是表现成
+     * 「这轮它没想调工具」。流被中途掐断时就是这个样子。
+     */
+    droppedCount(): number {
+      let n = 0;
+      for (const v of byIndex.values()) if (!v.name) n++;
+      return n;
+    },
     get size() {
       return byIndex.size;
     },
@@ -231,6 +247,7 @@ export function createStreamConsumer(h: {
   onReasoning(s: string): void;
   onToolCallDelta(d: ToolCallDelta[]): void;
   onUsage(u: Usage): void;
+  onFinishReason?(reason: string): void;
 }) {
   const parser = createSseParser((payload) => {
     if (payload === '[DONE]') return;
@@ -249,6 +266,7 @@ export function createStreamConsumer(h: {
     if (d.content) h.onContent(d.content);
     if (d.toolCalls.length) h.onToolCallDelta(d.toolCalls);
     if (d.usage) h.onUsage(d.usage);
+    if (d.finishReason) h.onFinishReason?.(d.finishReason);
   }
 
   return {

@@ -1451,6 +1451,16 @@ input[type='range'] {
   flex: 1;
 }
 
+/* 非正常结束的标记。用警示色而不是 faint —— 它存在的全部意义就是
+   让人注意到「这段话不是它说完了」，跟耗时、token 数不是一个分量 */
+.answer-foot .stop-reason {
+  color: var(--warn, #b45309);
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 5px;
+  cursor: help;
+}
+
 .thinking-dots {
   display: flex;
   gap: 5px;

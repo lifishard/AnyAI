@@ -57,6 +57,30 @@ function parseRetryAfter(msg: string): number | undefined {
 const DETERMINISTIC_5XX =
   /must be an absolute path|environment variable|env var|[A-Z][A-Z0-9_]{6,}\s+must|sandbox|panic|nil pointer|traceback|stack trace|NullPointer|no such file or directory|not implemented|unsupported operation/i;
 
+/**
+ * 网关背后要起一个命令行工具，而那个工具在网关那台机器上根本没装。
+ *
+ * 这类报错长这样：
+ *   Auggie CLI exited with code 1: 'auggie' is not recognized as an internal or external command
+ *   spawn claude ENOENT
+ *   /bin/sh: 1: codex: not found
+ *
+ * 判成「瞬时抖动、稍等重试」是最糟的误判 —— 用户会反复重发，而缺的那个
+ * 可执行文件不会因为多等一会儿就长出来。
+ */
+const MISSING_BINARY =
+  /is not recognized as an internal or external command|command not found|: not found|\bENOENT\b|exited with code \d|no such binary|executable file not found/i;
+
+/** 从报错里把那个缺失的命令名抠出来，好在建议里直接点名 */
+function guessMissingBinary(msg: string): string | null {
+  const m =
+    msg.match(/'([\w.-]+)' is not recognized/i) ??
+    msg.match(/spawn\s+([\w.-]+)\s+ENOENT/i) ??
+    msg.match(/([\w.-]+):\s*(?:command )?not found/i) ??
+    msg.match(/^([\w.-]+)\s+CLI exited/i);
+  return m ? m[1] : null;
+}
+
 const TRANSIENT_5XX =
   /bad gateway|gateway time|service unavailable|temporarily|overload|try again|upstream|connection reset|EOF/i;
 
@@ -173,6 +197,50 @@ export function classifyError(
   /* ---------------- 5xx：上游自己坏了 ---------------- */
 
   if (status >= 500) {
+    // 先看是不是「网关那台机器上缺可执行文件」—— 这比一般的 5xx 更明确，
+    // 也更容易给出有用的建议
+    const binary = has(msg, MISSING_BINARY) ? guessMissingBinary(msg) : null;
+    if (has(msg, MISSING_BINARY)) {
+      return mk(
+        'model_broken',
+        binary
+          ? `这条路由要在网关那台机器上跑 ${binary}，但它没装`
+          : '这条路由背后的命令行工具没装',
+        [
+          `换一个模型 —— 这跟你的请求无关，是${binary ? ` ${binary} ` : '那个'}可执行文件不在网关的 PATH 里`,
+          binary
+            ? `如果那个网关就跑在你自己电脑上，装好 ${binary} 并确保命令行里直接敲 ${binary} 能跑通，再重启网关`
+            : '如果网关是你自己跑的，看它的日志确认缺哪个命令',
+          '重试没有意义 —— 缺的可执行文件不会因为多等一会儿就出现',
+        ],
+        { blameModel: true },
+      );
+    }
+
+    /*
+     * 「流开了，但一个真事件都没吐出来」。
+     *
+     * 这类报错（STREAM_EARLY_EOF / Stream ended before producing…）信息量很低，
+     * 因为网关一旦决定用 SSE 回应，就已经把 200 和响应头发出去了 —— 后面再发现
+     * 上游拒绝（余额不够、路由挂了），它没法再改成一个正经的 4xx，只能把流一关。
+     *
+     * 所以真正有用的建议是**关掉流式重发一次**：非流式下网关能返回完整的 JSON
+     * 错误体，那里面通常写着真实原因。实测就是这么查出「余额不足」的。
+     */
+    if (has(msg, /STREAM_EARLY_EOF|stream ended before|no.{0,12}(sse|event).{0,20}(received|produced)|empty stream/i)) {
+      return mk(
+        'model_broken',
+        '上游开了流，但一个内容都没发过来',
+        [
+          '**把流式关掉再发一次** —— 非流式下上游能返回完整的错误说明，' +
+            '多半会直接告诉你真实原因（余额、配额、路由不可用）。开着流式时它已经没法回一个正经错误码了',
+          '这条路由如果是按量计费的，先去上游控制台看一眼余额',
+          '换一条能用的路由（比如网关里的 auto）',
+        ],
+        { retryable: false, blameModel: true },
+      );
+    }
+
     const deterministic = has(msg, DETERMINISTIC_5XX) && !has(msg, TRANSIENT_5XX);
     if (deterministic) {
       return mk(
@@ -248,4 +316,93 @@ export function backoffMs(attempt: number, info: { retryAfterMs?: number }): num
   if (info.retryAfterMs) return Math.min(info.retryAfterMs + 250, 30_000);
   const base = Math.min(1500 * 2 ** (attempt - 1), 15_000);
   return Math.round(base * (0.8 + Math.random() * 0.4)); // ±20% 抖动，避免多个请求同时回来
+}
+
+/* ------------------------------------------------------------------ *
+ * 「一轮结束了，但没有工具调用」——  到底是正常答完，还是出事了
+ *
+ * 之前这里是一句 `if (!roundCalls.length) break;`：答完了、被 max_tokens
+ * 砍断、被内容过滤拦下、流在半路断掉、工具调用只传了一半 —— 五种情况在
+ * 界面上长得一模一样，都表现为「气泡到这就没了」。用户的原话是
+ * 「对话有时候很短莫名其妙地就停了」，说的就是这个。
+ *
+ * 返回 null 表示这是一次正常收尾，不用打扰人。
+ *
+ * 有一条刻意的保守规定：**上游没给 finish_reason、但内容不为空时，不报错**。
+ * 相当多的网关在流式收尾包里根本不写这个字段，逐个报警只会让每次正常回答
+ * 都顶着一张红卡片 —— 那比现在的沉默更糟。只有「一个字都没有」才是确凿的。
+ * ------------------------------------------------------------------ */
+
+/** 这些 finish_reason 代表「它说完了」，各家叫法不同 */
+const CLEAN_STOP = /^(stop|end_turn|stop_sequence|eos|complete|completed|finished|null|normal)$/i;
+
+export function isCleanStop(reason: string | null): boolean {
+  return !reason || CLEAN_STOP.test(reason);
+}
+
+export function stopReasonInfo(
+  stop: { reason: string | null; droppedCalls: number },
+  ctx: { hadContent: boolean; sentTools: boolean; model?: string },
+): ErrorInfo | null {
+  const r = (stop.reason ?? '').toLowerCase();
+  const base = { detail: `finish_reason = ${stop.reason ?? '（上游没给）'}`, blameModel: false };
+
+  if (r === 'length' || r === 'max_tokens' || r === 'max_output_tokens') {
+    return {
+      ...base,
+      kind: 'bad_param',
+      title: '答到一半被 max_tokens 截断了',
+      retryable: false,
+      fixes: [
+        '右侧配置面板把 max_tokens 调大，或者干脆取消勾选让上游用它自己的上限',
+        '上面这段是**完整收到**的部分，不是全部 —— 直接说「接着写」通常能续上',
+        '开了工具的话，截断往往发生在它正要发工具调用的那一刻，所以看起来像「说要干活然后没动静」',
+      ],
+    };
+  }
+
+  if (r === 'content_filter' || r === 'safety' || r === 'blocked') {
+    return {
+      ...base,
+      kind: 'unknown',
+      title: '上游的内容过滤把这次回答拦下了',
+      retryable: false,
+      fixes: ['换个说法重问一次', '换一条别的路由 —— 各家的过滤尺度不一样'],
+    };
+  }
+
+  // 它说了要调工具，但一个都没解析出来（重试过了还是这样）
+  if (r === 'tool_calls' || r === 'function_call' || stop.droppedCalls > 0) {
+    return {
+      ...base,
+      kind: 'tools_unsupported',
+      title:
+        stop.droppedCalls > 0
+          ? `有 ${stop.droppedCalls} 个工具调用只传了一半就断了`
+          : '上游说这轮要调工具，但工具调用没传过来',
+      retryable: true,
+      fixes: [
+        '直接重发一次 —— 这种多半是流在工具调用中间被掐断了',
+        '右侧配置面板把「流式」关掉再试：非流式是整包返回，不存在传一半',
+        '换一条路由。有些网关代理工具调用时会把 tool_calls 字段吃掉',
+      ],
+    };
+  }
+
+  // 一个字都没有，还没有结束原因 —— 这是确凿的空回复
+  if (!ctx.hadContent) {
+    return {
+      ...base,
+      kind: 'model_broken',
+      title: '上游把流开了，但一个字都没发过来',
+      retryable: true,
+      fixes: [
+        '重发一次',
+        '这条路由如果是按量计费的，先去上游控制台看一眼余额',
+        '换一条能用的路由试试是不是这个模型自己的问题',
+      ],
+    };
+  }
+
+  return null;
 }

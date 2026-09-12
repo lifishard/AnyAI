@@ -95,6 +95,28 @@ export async function loadSettings(): Promise<AppSettings> {
     merged.tools = { ...defaultToolConfig(), ...(parsed.tools ?? {}) };
     merged.remote = { enabled: false, url: '', token: '', ...(parsed.remote ?? {}) };
     merged.skillSync = { dir: '', auto: false, ...(parsed.skillSync ?? {}) };
+    /*
+     * 一次性迁移：把老配置里默认开着的 max_tokens 关掉。
+     *
+     * 它当初是「默认开 + 4096」，等于给每一次请求都扣了一顶输出天花板。
+     * 这种由默认值造成的截断，用户几乎不可能自己定位到 —— 现象在输出末尾，
+     * 原因在一个他从没打开过的面板里。所以这里替他关掉一次。
+     *
+     * 只做一次，认 schemaVersion。用户之后自己重新开它，不会再被关。
+     */
+    if ((parsed.schemaVersion ?? 1) < 2) {
+      const mt = merged.defaultConfig.params.max_tokens;
+      if (mt) merged.defaultConfig.params = { ...merged.defaultConfig.params, max_tokens: { ...mt, enabled: false } };
+      merged.schemaVersion = 2;
+    } else {
+      merged.schemaVersion = parsed.schemaVersion;
+    }
+
+    // 过期的记忆当场丢掉，别让它在设置里躺成一条永远不会生效的死记录
+    merged.rememberedGrants =
+      parsed.rememberedGrants && parsed.rememberedGrants.expiresAt > Date.now()
+        ? parsed.rememberedGrants
+        : undefined;
     merged.effortMappings = parsed.effortMappings?.length
       ? parsed.effortMappings
       : defaultEffortMappings();
@@ -128,11 +150,34 @@ export async function loadConversations(): Promise<Conversation[]> {
     if (!raw) return [];
     const list = JSON.parse(raw) as Conversation[];
     if (!Array.isArray(list)) return [];
-    return list.map((c) => ({
-      ...c,
-      config: mergeParamDefaults(c.config ?? defaultGenerationConfig()),
-      messages: (c.messages ?? []).map((m) => ({ ...m, pending: false })),
-    }));
+
+    /*
+     * 每条会话都拷了一份自己的 config，所以那顶 max_tokens 天花板也拷进去了。
+     * 只迁移 defaultConfig 的话，老对话会继续被截断，而用户以为已经修好了。
+     * 这里单独读一次设置判版本 —— 多一次 kv 读，换「修了就是修了」。
+     */
+    let stripCap = false;
+    try {
+      const sRaw = await getTransport().kvGet(K_SETTINGS);
+      stripCap = !sRaw || ((JSON.parse(sRaw) as Partial<AppSettings>).schemaVersion ?? 1) < 2;
+    } catch {
+      /* 读不到就不迁移，宁可不动用户的东西 */
+    }
+
+    return list.map((c) => {
+      const config = mergeParamDefaults(c.config ?? defaultGenerationConfig());
+      if (stripCap && config.params.max_tokens) {
+        config.params = {
+          ...config.params,
+          max_tokens: { ...config.params.max_tokens, enabled: false },
+        };
+      }
+      return {
+        ...c,
+        config,
+        messages: (c.messages ?? []).map((m) => ({ ...m, pending: false })),
+      };
+    });
   } catch {
     return [];
   }

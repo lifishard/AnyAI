@@ -288,7 +288,9 @@ export default function Composer(props: {
                   </button>
                 </span>
               ))}
-              <span className="queue-note">这些技能的指令会注入本轮</span>
+              <span className="queue-note">
+                这些技能的指令会注入每一轮，直到你点 ✕ 摘掉
+              </span>
             </div>
           ) : null}
 

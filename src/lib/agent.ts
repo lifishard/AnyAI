@@ -7,6 +7,7 @@ import type {
   SourceRef,
   ToolCall,
   ToolContext,
+  StopInfo,
   ToolResult,
   ToolStep,
   Usage,
@@ -15,22 +16,11 @@ import { buildHeaders, endpoint } from './api';
 import { buildRequestBody, type ContentPart, type WireMessage } from './paramSchema';
 import { TOOL_BY_NAME, availableTools } from './tools/registry';
 import type { EffortMapping } from './effort';
-import { backoffMs, classifyError } from './errors';
+import { backoffMs, classifyError, stopReasonInfo } from './errors';
 import { getTransport } from './transport';
 import { uid } from './store';
-
-/* ------------------------------------------------------------------ *
- * 给模型的工具使用守则。
- * 只有真的下发了 tools 才追加，否则白白占 token 还会让模型胡乱提工具。
- * ------------------------------------------------------------------ */
-const TOOL_SYSTEM_SUFFIX = `
-你可以调用工具来完成任务。守则：
-1. 涉及最新信息、具体数字、价格、版本号，或任何你不确定的事实，先用 web_search 查证再回答，不要凭记忆编造。
-2. 引用了搜索结果或网页内容时，在相应句子末尾用 [1]、[2] 标注来源编号，编号对应工具返回结果里给出的编号。不要编造编号。
-3. 搜索结果的摘要不够判断时，用 fetch_url 读全文；需要登录态或 JS 渲染后才有内容的页面，改用 chrome_read_page。
-4. 会改变状态的操作（写文件、执行命令、提交 issue），先用一句话说明你要做什么再调用。
-5. 信息够了就直接回答，不要为了用工具而用工具。同一个工具不要用相同参数反复调用。
-`.trim();
+import { composeSystem } from './system';
+import { estimateTokens, inputBudget, looksLikeOverflow, parseLimits, type LearnedLimit } from './limits';
 
 export interface AgentEvents {
   onContentDelta(s: string): void;
@@ -42,6 +32,12 @@ export interface AgentEvents {
   onRound(round: number, maxRounds: number): void;
   /** 生成期间的临时提示，例如「限流，3 秒后重试」。传空串表示清掉 */
   onNotice(text: string): void;
+  /**
+   * 这一轮上游给的 finish_reason（null = 上游压根没给）。
+   * 正常收尾也会回调，界面自己决定要不要显示 —— 它是「为什么停」的唯一证据，
+   * 不该只在出错时才存在。
+   */
+  onStopReason(reason: string | null): void;
   onDone(): void;
   onError(message: string, info: ErrorInfo): void;
 }
@@ -68,6 +64,10 @@ export interface RunAgentArgs {
   autoRetry: number;
   /** 用于错误归类的展示名 */
   profileName?: string;
+  /** 这条路由已知的窗口大小（从之前的报错里学来的），没有就返回 undefined */
+  limitOf?: () => LearnedLimit | undefined;
+  /** 又从报错里学到了新的窗口信息，交给上层存起来 */
+  onLearnLimit?: (l: LearnedLimit) => void;
   /** 危险工具执行前的确认。返回 false 表示拒绝 */
   confirm(step: ToolStep): Promise<boolean>;
   /**
@@ -150,9 +150,7 @@ function toWire(
     out.push({ role: m.role, content: parts });
   }
 
-  const sys = [cfg.systemPrompt.trim(), extraSystem.trim(), withTools ? TOOL_SYSTEM_SUFFIX : '']
-    .filter(Boolean)
-    .join('\n\n');
+  const sys = composeSystem(cfg.systemPrompt, extraSystem, withTools);
   if (sys) out.unshift({ role: 'system', content: sys });
 
   return out;
@@ -168,21 +166,72 @@ function toWire(
  * 早就超出缓存能省下的量级了，而且每条只会被压一次，压完前缀重新稳定。
  * ------------------------------------------------------------------ */
 
+/*
+ * 软上限：1M token。
+ *
+ * 以前这里是 120_000 **字符**的工具输出预算，每一轮无条件执行。那是一道
+ * 应用自己画的线，跟模型能吃多少无关 —— 用户拿 200K 窗口的模型跑长任务，
+ * 一样在 120K 字符处被悄悄削掉历史。
+ *
+ * 现在的规矩：**不到 1M token 不动它**。真正的硬限制只有两个，都不是我们定的：
+ *   1. 这条路由的窗口（撞出来之后记在 limits.ts 里，按它压）
+ *   2. 1M token 这道系统级的线 —— 再往上，压缩本身的开销和出错概率都不划算了
+ *
+ * 到线时会先在界面上说一声再压，而不是默默削。
+ */
+const SOFT_LIMIT_TOKENS = 1_000_000;
+
+/** 到达软上限后压到这里，留出继续干活的余量 */
+const SOFT_TARGET_TOKENS = 700_000;
+
 const TOOL_OUTPUT_BUDGET = 120_000;
 
-function compactToolOutputs(msgs: ChatMessage[]): void {
+/**
+ * 压到 budget（字符数）以内。预算作为参数传进来，是因为撞墙之后要能压得更狠：
+ * 120K → 30K → 8K。一次压不下去就再压一轮，而不是把整条任务判死。
+ *
+ * 返回是否真的压掉了东西 —— 压不动了就没必要再重试同一个请求。
+ */
+function compactToolOutputs(msgs: ChatMessage[], budget = TOOL_OUTPUT_BUDGET): boolean {
   let used = 0;
+  let changed = false;
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
     if (m.role !== 'tool') continue;
     if (m.content.startsWith('（旧的工具输出已省略')) continue;
 
     used += m.content.length;
-    if (used <= TOOL_OUTPUT_BUDGET) continue;
+    if (used <= budget) continue;
 
     const head = m.content.replace(/\s+/g, ' ').slice(0, 240);
     m.content = `（旧的工具输出已省略以控制上下文长度。开头是：${head}…）`;
+    changed = true;
   }
+  return changed;
+}
+
+/**
+ * 工具输出已经压无可压时，最后一招：把**中段的对话本身**折叠掉。
+ *
+ * 保留头尾 —— 开头是任务定义，结尾是当前进展，中间那截推理过程丢了
+ * 还能接着干。全丢了就只能从头再来，而「从头再来」正是这次要消灭的东西。
+ */
+function foldMiddle(msgs: ChatMessage[], keepHead: number, keepTail: number): boolean {
+  const first = msgs.findIndex((m) => m.role !== 'system');
+  if (first < 0) return false;
+  const start = first + keepHead;
+  const end = msgs.length - keepTail;
+  if (end - start < 2) return false;
+
+  const dropped = end - start;
+  msgs.splice(start, dropped, {
+    id: uid('m'),
+    role: 'user',
+    content: `（为了不超出上下文窗口，中间 ${dropped} 条消息已折叠。之前做过的事请以后面的工具结果为准；` +
+      '缺了必要信息就重新查一次，不要凭印象编。）',
+    createdAt: Date.now(),
+  });
+  return true;
 }
 
 /* ------------------------------------------------------------------ *
@@ -198,6 +247,16 @@ function renderToolOutput(res: ToolResult, numbered: SourceRef[]): string {
     .map((s) => `[${s.n}] ${s.title}${s.url ? ` — ${s.url}` : s.path ? ` — ${s.path}` : ''}`)
     .join('\n');
   return `可引用来源（在回答里用方括号编号引用）：\n${head}\n\n---\n${res.content}`;
+}
+
+/**
+ * 把这一轮的失败原因取出来。
+ *
+ * 存在的唯一理由是重置 TS 的控制流窄化 —— 见调用点那段注释。
+ * 返回类型是显式声明的，所以调用方拿到的永远是 string | null。
+ */
+function takeFailure(s: { failed: string | null }): string | null {
+  return s.failed;
 }
 
 /** 可被中止打断的等待 */
@@ -232,6 +291,32 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
         ? cfg.enabledTools.filter((n) => usable.has(n) && TOOL_BY_NAME[n])
         : [];
 
+      /*
+       * 「开着工具开关，但一个工具都发不出去」必须当场说破。
+       *
+       * 之前这里是静默的：请求体里没有 tools，模型手上空空如也，于是它
+       * 只能用嘴描述自己在调用工具 ——「现在真正调用工具获取信息」然后停住。
+       * 看起来像模型在敷衍，其实是应用根本没给它工具。
+       */
+      if (cfg.toolsEnabled && toolNames.length === 0) {
+        const why = cfg.enabledTools.length
+          ? '勾选的那些工具在这个平台上都跑不了（比如在手机上勾了只有桌面端才有的工具）'
+          : '一个工具都没勾';
+        events.onError('工具开关是开的，但实际下发的工具数为 0', {
+          kind: 'tools_unsupported',
+          title: '这次请求里没有任何工具',
+          detail: `toolsEnabled=true，enabledTools=[${cfg.enabledTools.join(', ')}]，可用交集为空。原因：${why}。`,
+          fixes: [
+            '右侧配置面板 →「给模型下发工具」下面，至少勾一个工具',
+            '要让它截屏或点鼠标，先勾上 request_access，让它自己开口申请',
+            '不想用工具的话，把「给模型下发工具」整个关掉 —— 那样模型就不会再说要调用工具了',
+          ],
+          retryable: false,
+          blameModel: false,
+        });
+        return;
+      }
+
       // 最后一条用户消息带没带图，用来把「纯文本模型收到图片」的 400 翻译准确
       const hasImage = [...args.history]
         .reverse()
@@ -242,23 +327,83 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
       const working: ChatMessage[] = [...args.history];
       const sources: SourceRef[] = [];
       const seenUrls = new Set<string>();
-      const maxRounds = Math.max(1, cfg.maxToolRounds || 1);
+      // 上限钉在 1000：配置文件被改坏或从旧版本迁移过来时，
+      // 不该出现「一个问题打十万次接口」这种可能
+      const maxRounds = Math.min(1000, Math.max(1, cfg.maxToolRounds || 1));
+      // 「说了要调工具但没传过来」的重来次数，整次提问共用一个额度
+      let emptyToolRetries = 0;
+      // 上下文溢出后的「压缩再来」次数，整次提问共用
+      let overflowRetries = 0;
 
       for (let round = 1; round <= maxRounds; round++) {
         if (aborted) break;
         events.onRound(round, maxRounds);
 
-        compactToolOutputs(working);
-        const body = buildRequestBody(
+        /*
+         * 软上限检查。注意它跟下面那段「按路由窗口压」是两件事：
+         * 这一段管的是「大到系统扛不住」，下面那段管的是「上游收不下」。
+         */
+        const totalNow = estimateTokens(
+          working.map((m) => m.content).join('\n'),
+        );
+        if (totalNow > SOFT_LIMIT_TOKENS) {
+          events.onNotice(
+            `上下文到了 ${Math.round(totalNow / 10000) / 100}M token，正在折叠较早的内容…`,
+          );
+          let guard = 0;
+          while (
+            estimateTokens(working.map((m) => m.content).join('\n')) > SOFT_TARGET_TOKENS &&
+            guard++ < 8
+          ) {
+            if (!compactToolOutputs(working, TOOL_OUTPUT_BUDGET >> Math.min(guard - 1, 5))) {
+              if (!foldMiddle(working, 2, 8)) break;
+            }
+          }
+        }
+
+        /*
+         * 上下文预算。知道窗口多大就先自己压，不知道就先发出去、撞了再学。
+         * 「撞了再学」不丢人 —— 丢人的是撞完把 22 步的工作一起扔掉。
+         */
+        const mt = cfg.params.max_tokens;
+        const wantOutput = mt?.enabled ? Number(mt.value) || 4096 : 4096;
+        const budget = inputBudget(args.limitOf?.(), wantOutput);
+        if (budget) {
+          let guard = 0;
+          while (guard++ < 6) {
+            const est = estimateTokens(
+              toWire(working, cfg, toolNames.length > 0, args.extraSystem)
+                .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+                .join('\n'),
+            );
+            if (est <= budget) break;
+            // 先压工具输出，压不动了再折中段
+            if (!compactToolOutputs(working, Math.max(2000, 30_000 >> (guard - 1)))) {
+              if (!foldMiddle(working, 2, 6)) break;
+            }
+          }
+        }
+
+        const roomLeft = budget
+          ? budget -
+            estimateTokens(
+              toWire(working, cfg, toolNames.length > 0, args.extraSystem)
+                .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+                .join('\n'),
+            )
+          : null;
+        let body = buildRequestBody(
           cfg,
           toWire(working, cfg, toolNames.length > 0, args.extraSystem),
           toolNames,
           args.effortMappings,
+          roomLeft,
         );
 
         let roundContent = '';
         let roundReasoning = '';
         let roundCalls: ToolCall[] = [];
+        let roundStop: StopInfo = { reason: null, droppedCalls: 0 };
         // 放在对象里而不是裸 let：闭包里赋的值 TS 的控制流分析看不见，
         // 裸变量会被窄化成 null，后面 if 判断直接被当成死代码
         const roundState: { failed: string | null; status?: number } = { failed: null };
@@ -275,6 +420,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           roundContent = '';
           roundReasoning = '';
           roundCalls = [];
+          roundStop = { reason: null, droppedCalls: 0 };
           roundState.failed = null;
           roundState.status = undefined;
 
@@ -286,8 +432,16 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               body,
               stream: cfg.stream,
               timeoutMs: args.timeoutMs,
+              // 配额是按凭据算的，不是按地址 —— 同一把 key 在别的会话里也在跑时，
+              // 按地址分组会各记各的，两边都以为自己还有余量
+              paceKey: args.profile.id,
             },
             {
+              onPaceWait(ms) {
+                events.onNotice(
+                  `为避开限流，${Math.ceil(ms / 1000)} 秒后发出（这是刻意放慢，不是卡住）`,
+                );
+              },
               onContent(d) {
                 roundContent += d;
                 events.onContentDelta(d);
@@ -298,6 +452,9 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               },
               onToolCalls(calls) {
                 roundCalls = calls;
+              },
+              onStop(info) {
+                roundStop = info;
               },
               onUsage(u) {
                 events.onUsage(u);
@@ -310,9 +467,74 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
             },
           );
 
-          if (!roundState.failed || aborted) break;
+          /*
+           * 为什么要绕一个函数才能把错误取出来。
+           *
+           * `failed` 只在上面那个 onError 闭包里被赋值，而 TS 的控制流分析
+           * 看不进闭包 —— 它只看得见循环开头那句 `roundState.failed = null`，
+           * 于是认定这里的 failed 就是 null。判空之后剩下的分支被窄化成
+           * never，传给 classifyError 还能蒙混过关（never 赋给谁都行），
+           * 一旦对它调 .slice 就当场报错。
+           *
+           * 上一版试过 `const failMsg: string | null = roundState.failed` ——
+           * **不管用**。const 的类型注解定的是「能装什么」，实际类型仍然取
+           * 初始化表达式那一刻的窄化结果，也就是 null。
+           *
+           * 函数边界才是唯一能重置窄化的东西：takeFailure 的返回类型是声明
+           * 出来的 string | null，调用点拿到的就是它，跟外面窄成什么样无关。
+           */
+          const failMsg = takeFailure(roundState);
+          const failStatus = roundState.status;
+          if (!failMsg || aborted) break;
 
-          const info = classifyError(roundState.failed, roundState.status, {
+          /*
+           * 上下文撑爆了。这是唯一一类「重发同样的请求必然再失败，但把请求
+           * 改小一点就能成」的错误 —— 所以它不该跟限流共用退避重试，而该走
+           * 自己的路：压缩 → 重建请求体 → 立刻再试。
+           *
+           * 这里是整个改动的重点。之前 22 步的检索结果会随着这一个 400 一起
+           * 作废，用户得从头再问一遍；现在只是中间那截被折叠掉，任务接着跑。
+           */
+          if (looksLikeOverflow(failMsg) || failStatus === 413) {
+            const learned = parseLimits(failMsg);
+            if (learned.maxContext || learned.maxOutput) {
+              args.onLearnLimit?.({ ...learned, at: Date.now(), from: failMsg.slice(0, 300) });
+            }
+            if (overflowRetries < 3) {
+              overflowRetries++;
+              // 每次都压得更狠：30K → 8K → 2K 字符的工具输出预算
+              const shrink = [30_000, 8_000, 2_000][overflowRetries - 1];
+              const squeezed = compactToolOutputs(working, shrink) || foldMiddle(working, 2, 6);
+              if (squeezed) {
+                events.onNotice(`上下文超了，已折叠较早的内容（第 ${overflowRetries} 次），正在续跑…`);
+                body = buildRequestBody(
+                  cfg,
+                  toWire(working, cfg, toolNames.length > 0, args.extraSystem),
+                  toolNames,
+                  args.effortMappings,
+                  roomLeft,
+                );
+                continue;
+              }
+            }
+            // 压无可压才认输，而且要说清是压过之后仍然放不下
+            events.onNotice('');
+            events.onError(failMsg, {
+              kind: 'context_too_long',
+              title: '压缩过之后仍然放不下',
+              detail: failMsg,
+              fixes: [
+                '用 ⑂ 从关键的那一步分叉出新对话，只带需要的上下文继续',
+                '换一个窗口更大的模型 —— 这条路由的窗口刚才已经从报错里学到了，会记在这个模型名下',
+                '右侧配置面板把 max_tokens 调小，输出占的那部分也算在窗口里',
+              ],
+              retryable: false,
+              blameModel: false,
+            });
+            return;
+          }
+
+          const info = classifyError(failMsg, failStatus, {
             model: cfg.model,
             profileName: args.profileName,
             sentEffort: cfg.effortLevel !== 'off',
@@ -323,7 +545,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
 
           if (!info.retryable || emitted || attempt >= maxAttempts) {
             events.onNotice('');
-            events.onError(roundState.failed, info);
+            events.onError(failMsg, info);
             return;
           }
 
@@ -338,8 +560,34 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
         events.onNotice('');
         if (aborted) break;
 
-        // 没有工具调用 = 这就是最终回答
-        if (!roundCalls.length) break;
+        /* ---- 没有工具调用：可能是答完了，也可能是出事了 ---- */
+        if (!roundCalls.length) {
+          events.onStopReason(roundStop.reason);
+
+          // 上游说它要调工具，却一个都没解析出来 —— 几乎都是流在工具调用
+          // 中间断了。重来一次比把一个空气泡甩给用户强。只给两次机会，
+          // 不然一条坏路由能把 maxRounds 烧干净。
+          const wantedTools =
+            /^(tool_calls|function_call)$/i.test(roundStop.reason ?? '') || roundStop.droppedCalls > 0;
+          if (wantedTools && emptyToolRetries < 2 && !aborted) {
+            emptyToolRetries++;
+            events.onNotice('工具调用没传完整，正在重来一次…');
+            await sleep(800, () => aborted);
+            if (aborted) break;
+            continue;
+          }
+
+          const why = stopReasonInfo(roundStop, {
+            hadContent: roundContent.trim().length > 0 || roundReasoning.trim().length > 0,
+            sentTools: toolNames.length > 0,
+            model: cfg.model,
+          });
+          if (why) {
+            events.onError(why.title, why);
+            return;
+          }
+          break; // 正常收尾
+        }
 
         working.push({
           id: uid('m'),
@@ -495,8 +743,13 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               body: finalBody,
               stream: cfg.stream,
               timeoutMs: args.timeoutMs,
+              // 配额是按凭据算的，不是按地址 —— 同一把 key 在别的会话里也在跑时，
+              // 按地址分组会各记各的，两边都以为自己还有余量
+              paceKey: args.profile.id,
             },
             {
+              onPaceWait: (ms) =>
+                events.onNotice(`为避开限流，${Math.ceil(ms / 1000)} 秒后发出（这是刻意放慢，不是卡住）`),
               onContent: (d) => events.onContentDelta(d),
               onReasoning: (d) => events.onReasoningDelta(d),
               onToolCalls: () => {},

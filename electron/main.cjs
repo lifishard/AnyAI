@@ -22,10 +22,71 @@ let mainWindow = null;
  * 窗口
  * ------------------------------------------------------------------ */
 
+/*
+ * 窗口大小和位置要记住。
+ *
+ * 不记的话每次启动都回到 1280×860 —— 用户把窗口拉成竖条挂在副屏上，
+ * 更新一次就得重摆一次。它跟设置、授权一样属于「我调过的东西」，
+ * 凭什么一次更新就没了。
+ *
+ * 存在同一个 store.json 里，所以应用改名时的迁移逻辑对它一样生效。
+ */
+const BOUNDS_KEY = 'snc:window-bounds:v1';
+
+function savedBounds() {
+  try {
+    const raw = store.kvGet(BOUNDS_KEY);
+    if (!raw) return null;
+    const b = JSON.parse(raw);
+    if (typeof b?.width !== 'number' || typeof b?.height !== 'number') return null;
+    // 屏幕拔掉之后，上次那个坐标可能落在虚空里。挑一块真的存在的屏幕验证一下
+    const { screen } = require('electron');
+    const area = screen.getDisplayMatching({
+      x: b.x ?? 0,
+      y: b.y ?? 0,
+      width: b.width,
+      height: b.height,
+    }).workArea;
+    const onScreen =
+      typeof b.x === 'number' &&
+      typeof b.y === 'number' &&
+      b.x < area.x + area.width - 80 &&
+      b.y < area.y + area.height - 80 &&
+      b.x + b.width > area.x + 80 &&
+      b.y + b.height > area.y + 80;
+    return {
+      width: Math.max(420, Math.min(b.width, area.width)),
+      height: Math.max(520, Math.min(b.height, area.height)),
+      ...(onScreen ? { x: b.x, y: b.y } : {}),
+      maximized: Boolean(b.maximized),
+    };
+  } catch {
+    return null;
+  }
+}
+
+let boundsTimer = null;
+function rememberBounds(win) {
+  if (boundsTimer) clearTimeout(boundsTimer);
+  boundsTimer = setTimeout(() => {
+    try {
+      if (!win || win.isDestroyed()) return;
+      const maximized = win.isMaximized();
+      // 最大化时存「还原后」的尺寸，否则取消最大化会得到一个全屏大小的小窗口
+      const b = maximized ? win.getNormalBounds() : win.getBounds();
+      store.kvSet(BOUNDS_KEY, JSON.stringify({ ...b, maximized }));
+    } catch {
+      /* 存不上就算了，不值得为它崩一个窗口 */
+    }
+  }, 400);
+}
+
 function createWindow() {
+  const saved = savedBounds();
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width: saved?.width ?? 1280,
+    height: saved?.height ?? 860,
+    ...(saved && 'x' in saved ? { x: saved.x, y: saved.y } : {}),
     minWidth: 420,
     minHeight: 520,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#15171c' : '#f5f6f8',
@@ -39,7 +100,26 @@ function createWindow() {
     },
   });
 
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.once('ready-to-show', () => {
+    if (saved?.maximized) mainWindow.maximize();
+    mainWindow.show();
+  });
+
+  for (const ev of ['resize', 'move', 'maximize', 'unmaximize']) {
+    mainWindow.on(ev, () => rememberBounds(mainWindow));
+  }
+  // 关窗那一下也存一次：防抖的 400ms 可能还没到就退出了
+  mainWindow.on('close', () => {
+    if (boundsTimer) clearTimeout(boundsTimer);
+    try {
+      const maximized = mainWindow.isMaximized();
+      const b = maximized ? mainWindow.getNormalBounds() : mainWindow.getBounds();
+      store.kvSet(BOUNDS_KEY, JSON.stringify({ ...b, maximized }));
+      if (store.flush) store.flush();
+    } catch {
+      /* 同上 */
+    }
+  });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);

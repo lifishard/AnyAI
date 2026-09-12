@@ -1,5 +1,6 @@
 import type { GenerationConfig, KeyProfile, ModelInfo } from '../types';
 import { buildRequestBody, type WireMessage } from './paramSchema';
+import { composeSystem } from './system';
 import { getTransport } from './transport';
 
 export const BASE_URL_PRESETS = [
@@ -116,10 +117,20 @@ export async function fetchModels(
 /**
  * 预览将要发出的请求体，供配置面板里的「查看请求体」用。
  * 只展示一轮的形状，工具往返不在这里体现。
+ *
+ * extraSystem 是项目规范 + 本轮唤起的技能。它一定要出现在这里 ——
+ * 「我 /了一个技能，模型到底收到没有」这个问题，只有预览能回答。
+ * system 消息的拼法跟真实请求共用 composeSystem，不另写一份。
  */
-export function previewBody(cfg: GenerationConfig, userText: string, toolNames: string[]): string {
+export function previewBody(
+  cfg: GenerationConfig,
+  userText: string,
+  toolNames: string[],
+  extraSystem = '',
+): string {
   const messages: WireMessage[] = [];
-  if (cfg.systemPrompt.trim()) messages.push({ role: 'system', content: cfg.systemPrompt.trim() });
+  const sys = composeSystem(cfg.systemPrompt, extraSystem, toolNames.length > 0);
+  if (sys) messages.push({ role: 'system', content: sys });
   messages.push({ role: 'user', content: userText || '（这里是你输入的问题）' });
   return JSON.stringify(buildRequestBody(cfg, messages, toolNames), null, 2);
 }
