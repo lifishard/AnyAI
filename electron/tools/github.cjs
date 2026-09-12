@@ -48,10 +48,35 @@ function fitJson(text, maxChars) {
 
   if (data && typeof data === 'object') {
     const copy = { ...data };
-    delete copy.content; // 文件正文是唯一可能撑爆限额的字段
-    copy._truncated = true;
-    copy._hint = '正文太大，没有随 JSON 返回。用 raw:true 重新取这个路径。';
-    return { text: JSON.stringify(copy), truncated: true };
+    // 文件正文是最常见的超大字段
+    if (copy.content) {
+      delete copy.content;
+      copy._hint = '正文太大，没有随 JSON 返回。用 raw:true 重新取这个路径。';
+    }
+    let out = JSON.stringify({ ...copy, _truncated: true });
+    if (out.length <= maxChars) return { text: out, truncated: true };
+
+    // 还是太大：找出最大的那个数组字段（git trees 的 tree、搜索结果的 items
+    // 都是这个形状），按条目截到放得下为止。整体结构保持完整。
+    let biggest = null;
+    for (const [k, v] of Object.entries(copy)) {
+      if (Array.isArray(v) && (!biggest || v.length > copy[biggest].length)) biggest = k;
+    }
+    if (biggest) {
+      const arr = copy[biggest];
+      let lo = 0;
+      let hi = arr.length;
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        const probe = JSON.stringify({ ...copy, [biggest]: arr.slice(0, mid), _truncated: true });
+        if (probe.length <= maxChars) lo = mid;
+        else hi = mid - 1;
+      }
+      out = JSON.stringify({ ...copy, [biggest]: arr.slice(0, lo), _truncated: true, _dropped: arr.length - lo });
+      return { text: out, truncated: true };
+    }
+
+    return { text: out.slice(0, maxChars), truncated: true, broken: true };
   }
 
   return { text: text.slice(0, maxChars), truncated: true, broken: true };
