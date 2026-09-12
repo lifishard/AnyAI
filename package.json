@@ -22,6 +22,7 @@
     "android:apk": "npm run cap:sync && cd android && gradlew.bat assembleDebug",
     "setup": "npm install && npm run dist:win",
     "typecheck": "tsc --noEmit",
+    "check:lite": "node scripts/check-lite.mjs",
     "build:fast": "vite build",
     "dist:win:fast": "npm run build:fast && electron-builder --win",
     "init-repo": "node scripts/init-repo.mjs",

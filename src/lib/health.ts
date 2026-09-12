@@ -198,9 +198,11 @@ async function probeOne(
   apiKey: string,
   modelId: string,
   timeoutMs: number,
-): Promise<{ ok: boolean; info?: ErrorInfo }> {
+): Promise<{ ok: boolean; info?: ErrorInfo; hollow?: boolean }> {
   let failMsg: string | null = null;
   let failStatus: number | undefined;
+  /** 这次请求到底吐出东西了没有 —— 用来识别「200 但正文是空的」 */
+  let sawAnything = false;
 
   await getTransport().chat(
     {
@@ -217,10 +219,16 @@ async function probeOne(
       timeoutMs,
     },
     {
-      onContent() {},
-      onReasoning() {},
+      onContent(d) {
+        if (d) sawAnything = true;
+      },
+      onReasoning(d) {
+        if (d) sawAnything = true;
+      },
       onToolCalls() {},
-      onUsage() {},
+      onUsage(u) {
+        if (u?.completion_tokens || u?.total_tokens) sawAnything = true;
+      },
       onDone() {},
       onError(msg, status) {
         failMsg = msg;
@@ -229,12 +237,21 @@ async function probeOne(
     },
   );
 
-  if (failMsg === null) return { ok: true };
+  // 有些网关把非聊天模型（图像生成之类）也列进 /models，请求打过去返回 200
+  // 但正文里什么都没有。这种不算坏，但也不该打上「体检通过」的勾。
+  if (failMsg === null) return { ok: true, hollow: !sawAnything };
   return { ok: false, info: classifyError(failMsg, failStatus, { model: modelId }) };
 }
 
-function toHealth(r: { ok: boolean; info?: ErrorInfo }): ModelHealth {
-  if (r.ok) return { status: 'ok', at: Date.now(), fails: 0 };
+function toHealth(r: { ok: boolean; info?: ErrorInfo; hollow?: boolean }): ModelHealth {
+  if (r.ok) {
+    return {
+      status: 'ok',
+      at: Date.now(),
+      fails: 0,
+      reason: r.hollow ? '返回 200 但正文是空的 —— 可能不是聊天模型' : undefined,
+    };
+  }
   const info = r.info!;
   const status: ModelHealthStatus =
     info.kind === 'model_missing'

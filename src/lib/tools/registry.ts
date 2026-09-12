@@ -605,6 +605,8 @@ export const GROUP_LABEL: Record<ToolGroup, string> = {
   github: 'GitHub',
   agent: 'Agent',
   project: '项目与技能',
+  computer: '屏幕控制',
+  access: '权限',
 };
 
 /** 新会话默认开这些：够用、且都是只读的 */
