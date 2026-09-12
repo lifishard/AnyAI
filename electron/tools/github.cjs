@@ -2,6 +2,48 @@
 const { ok, fail, fetchWithTimeout, clip } = require('./common.cjs');
 
 const API = 'https://api.github.com';
+const CDN = 'https://raw.githubusercontent.com';
+
+/**
+ * 最近一次 API 调用回报的限额。给设置页显示用。
+ * GitHub 不带 token 是**按 IP** 每小时 60 次，没有任何客户端手段能重置它 ——
+ * 只能少打、或者带 token（5000 次）。
+ */
+let lastRateLimit = null;
+
+function rememberRateLimit(res) {
+  const remaining = res.headers.get('x-ratelimit-remaining');
+  if (remaining === null) return;
+  lastRateLimit = {
+    limit: Number(res.headers.get('x-ratelimit-limit')) || null,
+    remaining: Number(remaining),
+    resetAt: Number(res.headers.get('x-ratelimit-reset')) * 1000 || null,
+    at: Date.now(),
+  };
+}
+
+function rateLimitNote() {
+  if (!lastRateLimit) return '';
+  const { remaining, limit, resetAt } = lastRateLimit;
+  if (remaining === null) return '';
+  const mins = resetAt ? Math.max(0, Math.round((resetAt - Date.now()) / 60000)) : null;
+  return `（API 额度 ${remaining}/${limit ?? '?'}${mins !== null ? `，${mins} 分钟后重置` : ''}）`;
+}
+
+/**
+ * 公开仓库取文件正文时改走 raw.githubusercontent.com。
+ *
+ * 这是省额度的关键：CDN 不计入 API 的每小时配额。装一个技能仓库原来要打
+ * 二十几次 API，现在只有「列目录」和「拉目录树」两次走 API，正文全走 CDN。
+ *
+ * 私有仓库 CDN 访问不到，会自动退回 API（那时必须有 token）。
+ */
+function toCdnUrl(apiPath) {
+  const m = apiPath.match(/^\/repos\/([^/]+)\/([^/]+)\/contents\/(.+?)(?:\?ref=([^&]+))?$/);
+  if (!m) return null;
+  const [, owner, repo, filePath, ref] = m;
+  return `${CDN}/${owner}/${repo}/${ref ? decodeURIComponent(ref) : 'HEAD'}/${filePath}`;
+}
 
 function headers(token, raw) {
   const h = {
@@ -85,6 +127,15 @@ function fitJson(text, maxChars) {
 async function githubApi(args, ctx, secrets) {
   const method = String(args.method || 'GET').toUpperCase();
   const raw = Boolean(args.raw);
+  /*
+   * JSON 返回值的字符上限。
+   *
+   * 默认 40000 是为了保护模型的上下文 —— 模型看不完也不该看几十万字符的 JSON。
+   * 但应用内部的调用（列目录树找技能）是拿去做逻辑判断的，截断意味着**结果不完整**
+   * 而不是「少看几行」。这个参数刻意不写进 registry 的 schema：它是给内部调用用的，
+   * 不是给模型用的。
+   */
+  const maxChars = Math.min(2000000, Math.max(1000, Number(args.max_chars) || 40000));
   let p = String(args.path || '').trim();
   if (!p) return fail('path 不能为空');
   if (!p.startsWith('/')) p = `/${p}`;
@@ -95,6 +146,28 @@ async function githubApi(args, ctx, secrets) {
     return fail('这个操作需要 GitHub Token。设置 → 工具 → GitHub 里填一个 personal access token。');
   }
 
+  // 取公开仓库的文件正文：先试 CDN，省下一次 API 额度
+  if (raw && method === 'GET') {
+    const cdnUrl = toCdnUrl(p);
+    if (cdnUrl) {
+      try {
+        const res = await fetchWithTimeout(cdnUrl, { headers: { 'User-Agent': 'AnyAI' } }, ctx.toolTimeoutMs);
+        if (res.ok) {
+          const text = await res.text();
+          const LIMIT = 400000;
+          const body = text.length > LIMIT ? `${text.slice(0, LIMIT)}\n…（文件过大，已截断）` : text;
+          return ok(body, { summary: `GitHub raw ${p}（${text.length} 字符，走 CDN 不计额度）` });
+        }
+        // 404 在公开仓库里就是「没这个文件」，不必再花一次 API 去确认
+        if (res.status === 404 && !token) {
+          return fail(`GitHub 返回 HTTP 404：${p} 不存在`);
+        }
+      } catch {
+        /* CDN 挂了就退回 API */
+      }
+    }
+  }
+
   try {
     const opts = { method, headers: headers(token, raw) };
     if (method !== 'GET' && method !== 'DELETE' && args.body !== undefined) {
@@ -103,11 +176,18 @@ async function githubApi(args, ctx, secrets) {
     }
 
     const res = await fetchWithTimeout(`${API}${p}`, opts, ctx.toolTimeoutMs);
+    rememberRateLimit(res);
     const text = await res.text();
 
     if (!res.ok) {
       const remaining = res.headers.get('x-ratelimit-remaining');
-      const extra = remaining === '0' ? '（API 限额用完了；填上 token 额度会高很多）' : '';
+      const reset = Number(res.headers.get('x-ratelimit-reset')) * 1000;
+      const mins = reset ? Math.max(1, Math.round((reset - Date.now()) / 60000)) : null;
+      const extra =
+        remaining === '0'
+          ? `（API 每小时限额已用完${mins ? `，${mins} 分钟后自动恢复` : ''}。` +
+            '限额是 GitHub 按 IP 算的，客户端没法重置；填一个 token 额度会从 60 变成 5000）'
+          : '';
       return fail(`GitHub 返回 HTTP ${res.status}${extra}：${text.slice(0, 400)}`);
     }
 
@@ -125,9 +205,9 @@ async function githubApi(args, ctx, secrets) {
       /* 不是 JSON 就原样返回 */
     }
 
-    const fitted = fitJson(pretty, 40000);
+    const fitted = fitJson(pretty, maxChars);
     return ok(fitted.text, {
-      summary: `GitHub ${method} ${p}${fitted.truncated ? '（响应过大，已裁剪）' : ''}`,
+      summary: `GitHub ${method} ${p}${fitted.truncated ? '（响应过大，已裁剪）' : ''}${rateLimitNote()}`,
     });
   } catch (e) {
     return fail(e);
@@ -184,4 +264,4 @@ async function githubSearch(args, ctx, secrets) {
   }
 }
 
-module.exports = { githubApi, githubSearch };
+module.exports = { githubApi, githubSearch, lastRateLimit: () => lastRateLimit };

@@ -2,7 +2,7 @@ import React from 'react';
 import type { AppSettings, KeyProfile, SearchProvider } from '../types';
 import { BASE_URL_PRESETS, normalizeBaseUrl } from '../lib/api';
 import { secretDelete, secretGet, secretSet, uid } from '../lib/store';
-import { desktop, type ChromeStatus, type RemoteStatus } from '../lib/transport';
+import { desktop, getTransport, type ChromeStatus, type RemoteStatus } from '../lib/transport';
 import {
   EFFORT_LEVELS,
   STYLE_LABEL,
@@ -91,6 +91,72 @@ function SecretInput(props: {
 /* ------------------------------------------------------------------ *
  * Chrome 段落。带 hooks，独立成组件。
  * ------------------------------------------------------------------ */
+
+
+/**
+ * GitHub API 额度显示。
+ *
+ * /rate_limit 这个接口本身**不计入额度**，所以查它是免费的。
+ * 这是「有没有入口重置」这个问题唯一能给的诚实答案：重置不了，但至少能看见
+ * 还剩多少、什么时候自己恢复。
+ */
+/** 构建时间戳，本地时区显示。拿不到就说明是开发模式下跑的 */
+function buildTime(): string {
+  try {
+    return new Date(__BUILD_TIME__).toLocaleString();
+  } catch {
+    return '开发模式（未打包）';
+  }
+}
+
+function RateLimitRow() {
+  const [state, setState] = React.useState<
+    { remaining: number; limit: number; resetAt: number } | null
+  >(null);
+  const [err, setErr] = React.useState<string | null>(null);
+  const [busy, setBusy] = React.useState(false);
+
+  const check = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await getTransport().callTool(
+        'github_api',
+        { method: 'GET', path: '/rate_limit' },
+        { toolTimeoutMs: 20000 } as never,
+      );
+      if (!res.ok) throw new Error(res.error ?? '查询失败');
+      const data = JSON.parse(res.content) as {
+        resources?: { core?: { remaining: number; limit: number; reset: number } };
+      };
+      const core = data.resources?.core;
+      if (!core) throw new Error('返回里没有 core 额度');
+      setState({ remaining: core.remaining, limit: core.limit, resetAt: core.reset * 1000 });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mins = state ? Math.max(0, Math.round((state.resetAt - Date.now()) / 60000)) : 0;
+
+  return (
+    <div className="row" style={{ alignItems: 'center', gap: 8, marginTop: 4 }}>
+      <button className="btn sm" onClick={() => void check()} disabled={busy}>
+        {busy ? '查询中…' : '查看剩余额度'}
+      </button>
+      {state ? (
+        <span className="hint">
+          还剩 <b>{state.remaining}</b> / {state.limit} 次
+          {state.remaining === 0 ? ` —— ${mins} 分钟后自动恢复` : `，${mins} 分钟后重置计数`}
+          {state.limit <= 60 ? '（这是未登录的额度，填 token 会变成 5000）' : '（token 生效中）'}
+        </span>
+      ) : null}
+      {err ? <span className="hint" style={{ color: 'var(--danger-fg, #b91c1c)' }}>{err}</span> : null}
+    </div>
+  );
+}
 
 function ChromeSection(props: { port: number; onPort: (p: number) => void }) {
   const bridge = desktop();
@@ -604,10 +670,22 @@ export default function SettingsDialog(props: {
           <div className="section-title">GitHub</div>
           <Field
             label="Personal Access Token"
-            hint="不填也能用，但只能读公开内容且限额很低（每小时 60 次）。代码搜索必须要 token。"
+            hint="不填也能用，但只能读公开内容，而且限额是按 IP 每小时 60 次。填了变成 5000 次。代码搜索必须要 token。"
           >
             <SecretInput secretId="tool:github" placeholder="ghp_... 或 github_pat_..." />
           </Field>
+          <RateLimitRow />
+          <div className="hint" style={{ marginTop: 6, lineHeight: 1.8 }}>
+            到哪拿：github.com → Settings → Developer settings → Personal access tokens →
+            <b> Fine-grained tokens</b> → Generate new token。Repository access 选
+            「Public Repositories (read-only)」就够装技能了，什么权限都不用勾。
+            <br />
+            已经装了 GitHub CLI 的话更快：命令行跑 <code>gh auth login</code>，然后
+            <code>gh auth token</code> 会把 token 打印出来，复制粘贴进上面那个框。
+            <br />
+            <b>限额不能重置</b> —— 它是 GitHub 服务端按 IP 算的滚动窗口，客户端没有任何手段清零，
+            只能等窗口滚过去，或者换成 token 额度。
+          </div>
         </div>
 
         <div className="section">
@@ -829,11 +907,17 @@ export default function SettingsDialog(props: {
           />
         </Field>
 
-        {props.storePath ? (
-          <div className="hint" style={{ marginTop: 16 }}>
-            数据文件：<code>{props.storePath}</code>
-          </div>
-        ) : null}
+        <div className="hint" style={{ marginTop: 16, lineHeight: 1.9 }}>
+          {props.storePath ? (
+            <>
+              数据文件：<code>{props.storePath}</code>
+              <br />
+            </>
+          ) : null}
+          构建于：<code>{buildTime()}</code>
+          <br />
+          改了代码之后要重新跑一次打包，这里的时间才会变 —— 遇到「明明改了却没生效」先看这个。
+        </div>
       </div>
     );
   }

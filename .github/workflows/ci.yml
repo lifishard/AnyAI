@@ -18,8 +18,21 @@ jobs:
           node-version: 22
           cache: npm
 
+      # npm ci 的契约是「lock 跟 package.json 必须完全一致」，对不上就直接失败。
+      # 加依赖或改了包名之后忘了提交新的 lock，CI 就会在这里挂掉，而且报错
+      # 看起来像是构建失败 —— 所以这里退一步用 npm install，并把情况打出来。
+      # 正确做法仍然是本地 npm install 之后把 package-lock.json 一起提交。
       - name: 安装依赖
-        run: npm ci
+        run: |
+          npm ci || {
+            echo "::warning::package-lock.json 与 package.json 不同步，已退回 npm install。请在本地跑一次 npm install 并提交新的 lock。"
+            npm install --no-audit --no-fund
+          }
+
+      # 先跑不需要依赖的低级错误检查：导入对不对得上、有没有漏声明的变量、
+      # Record<联合类型> 的键全不全。它比 tsc 快得多，报错也更直白。
+      - name: 低级错误检查
+        run: npm run check:lite
 
       # 这一步是拦截线：类型错在这里挡住，别流到 release 里去。
       # 本地打包脚本对类型错只警告不阻断（vite 用 esbuild 剥类型，

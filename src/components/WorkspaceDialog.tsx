@@ -1,6 +1,14 @@
 import React from 'react';
 import type { KeyProfile, ModelInfo, ToolContext } from '../types';
-import { installFromGithub, makeSkill, parseSkillMd, toSkillMd, type Skill } from '../lib/skills';
+import {
+  describeMerge,
+  installFromGithub,
+  makeSkill,
+  mergeSkills,
+  parseSkillMd,
+  toSkillMd,
+  type Skill,
+} from '../lib/skills';
 import { makeProject, type Project, type ProjectDoc } from '../lib/projects';
 import {
   describeSchedule,
@@ -280,12 +288,20 @@ function SkillsTab(props: {
     setInstalling(true);
     setMsg('连接 GitHub…');
     try {
-      const found = await installFromGithub(input, props.toolCtx, (s) => setMsg(s));
-      // 同名的覆盖，不同名的追加
-      const byName = new Map(props.skills.map((s) => [s.name, s]));
-      for (const f of found) byName.set(f.name, { ...f, id: byName.get(f.name)?.id ?? f.id });
-      props.onChange([...byName.values()]);
-      setMsg(`装好了 ${found.length} 个：${found.map((f) => `/${f.name}`).join(' ')}`);
+      let lastTrace = '';
+      const found = await installFromGithub(input, props.toolCtx, (s) => {
+        if (s.startsWith('扫描完成')) lastTrace = s;
+        setMsg(s);
+      });
+      const { skills: merged, report } = mergeSkills(props.skills, found);
+      props.onChange(merged);
+      // 把扫描过程一起显示：装少了的时候，光看「装好了 N 个」根本不知道
+      // 是仓库里就这么多，还是找的过程中断在哪儿
+      setMsg(
+        `${describeMerge(report)}\n` +
+          `找到 ${found.length} 个：${found.map((f) => `/${f.name}`).join(' ')}` +
+          (lastTrace ? `\n${lastTrace}` : ''),
+      );
       setGhInput('');
     } catch (e) {
       setMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
@@ -320,7 +336,14 @@ function SkillsTab(props: {
           </button>
         </div>
         {msg ? (
-          <div className="hint" style={{ marginTop: 6, color: msg.startsWith('✗') ? 'var(--danger)' : undefined }}>
+          <div
+            className="hint"
+            style={{
+              marginTop: 6,
+              whiteSpace: 'pre-wrap',
+              color: msg.startsWith('✗') ? 'var(--danger)' : undefined,
+            }}
+          >
             {msg}
           </div>
         ) : (

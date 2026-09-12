@@ -27,6 +27,22 @@ export interface Skill {
   installedAt: number;
   /** 唤起次数，用来把常用的排前面 */
   uses: number;
+  /**
+   * 安装时正文的指纹。
+   * 用来区分「用户手改过」和「原样没动」—— 重装时前者不该被静默覆盖掉。
+   * 手写的技能没有这个字段。
+   */
+  installedHash?: string;
+}
+
+/** 极简 FNV-1a。只用来判断「正文变没变过」，不需要抗碰撞 */
+export function bodyHash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
 }
 
 export function slugify(name: string): string {
@@ -107,6 +123,7 @@ export function makeSkill(
     enabled: partial.enabled ?? true,
     installedAt: Date.now(),
     uses: 0,
+    installedHash: partial.installedHash,
   };
 }
 
@@ -188,14 +205,26 @@ interface GhEntry {
   type: string;
   name: string;
   path: string;
+  /** 目录的 sha —— 用它可以一次把整棵子树拉下来，省掉逐层列目录 */
+  sha?: string;
   content?: string;
   encoding?: string;
 }
 
-async function ghJson(pathAndQuery: string, ctxLike: unknown): Promise<unknown> {
+interface GhTree {
+  tree?: { path: string; type: string }[];
+  truncated?: boolean;
+  _truncated?: boolean;
+}
+
+async function ghJson(
+  pathAndQuery: string,
+  ctxLike: unknown,
+  maxChars?: number,
+): Promise<unknown> {
   const res = await getTransport().callTool(
     'github_api',
-    { method: 'GET', path: pathAndQuery },
+    { method: 'GET', path: pathAndQuery, ...(maxChars ? { max_chars: maxChars } : {}) },
     ctxLike as never,
   );
   if (!res.ok) throw new Error(res.error ?? 'GitHub 请求失败');
@@ -268,14 +297,24 @@ export async function installFromGithub(
 
   onProgress?.(`在 ${t.owner}/${t.repo} 里找技能…`);
 
+  /**
+   * 一次最多装多少个。
+   * 不带 token 时 GitHub API 每小时只有 60 次，每个技能至少要一次取正文，
+   * 所以这个上限同时也是在保护额度。撞顶会明确告诉用户。
+   */
+  const MAX_SKILLS = 50;
+
   const found: Skill[] = [];
   const seen = new Set<string>();
+  /** 扫描过程的账：装少了的时候，这个能一眼看出卡在哪一步 */
+  const trace = { dirs: 0, trees: 0, filesTried: 0 };
   /** 非 404 的失败：限额、网络、权限。这些必须让用户看见，不能当成「没找到」 */
   const hardErrors: string[] = [];
 
   const tryFile = async (p: string, opts: { requireFrontmatter?: boolean } = {}) => {
-    if (seen.has(p) || found.length >= 20) return;
+    if (seen.has(p) || found.length >= MAX_SKILLS) return;
     seen.add(p);
+    trace.filesTried++;
     try {
       const md = await ghRaw(`${base}/${p}${refQ}`, toolCtx);
       if (!md.trim()) return;
@@ -289,7 +328,13 @@ export async function installFromGithub(
 
       const parsed = parseSkillMd(md, fallback);
       if (!parsed.body.trim()) return;
-      found.push(makeSkill({ ...parsed, source: `github:${t.owner}/${t.repo}/${p}` }));
+      found.push(
+        makeSkill({
+          ...parsed,
+          source: `github:${t.owner}/${t.repo}/${p}`,
+          installedHash: bodyHash(parsed.body),
+        }),
+      );
       onProgress?.(`找到 ${parsed.name}（${Math.round(md.length / 1024)} KB）`);
     } catch (e) {
       if (!isNotFound(e)) {
@@ -314,6 +359,54 @@ export async function installFromGithub(
       .filter((e) => e.type === 'file' && /\.md$/i.test(e.name))
       .sort((a, b) => nameRank(a.name) - nameRank(b.name));
 
+  /**
+   * 一次把某个目录的整棵子树拉下来，从里面挑出所有 SKILL.md。
+   *
+   * 为什么不逐层列目录：anthropics/skills 那种仓库 skills/ 下面有二十几个
+   * 技能目录，逐个列要二十几次 API 调用 —— 不带 token 每小时只有 60 次，
+   * 装一个仓库就能把额度打光。子树接口一次就够。
+   */
+  const skillPathsInTree = async (dirPath: string, sha: string): Promise<string[]> => {
+    trace.trees++;
+    try {
+      /*
+       * 先拿**非递归**的一层。
+       *
+       * 上一版用了 ?recursive=1，结果 skills/ 下面每个技能目录里的 references/、
+       * scripts/ 全被列了出来，几百个条目把返回值撑爆，被截断成前 5 个技能 ——
+       * JSON 仍然合法，所以一路静默走到底。能解析不等于完整。
+       *
+       * 一层就够了：skills/<名字>/SKILL.md 是标准布局，拿到 <名字> 之后
+       * 直接去 CDN 取文件，不花 API 额度。
+       */
+      const r = (await ghJson(
+        `/repos/${t.owner}/${t.repo}/git/trees/${sha}`,
+        toolCtx,
+        500000,
+      )) as GhTree;
+      const items = Array.isArray(r?.tree) ? r.tree : [];
+
+      if (r?.truncated || r?._truncated) {
+        // 真发生了就必须说出来，不能像上次那样悄悄少装
+        hardErrors.push(`${dirPath} 的目录树太大被截断了，可能漏掉一部分技能`);
+      }
+
+      const out: string[] = [];
+      for (const e of items) {
+        if (e.type === 'blob' && /^SKILL\.md$/i.test(e.path)) out.push(`${dirPath}/${e.path}`);
+        // 子目录：直接按标准布局猜一个 SKILL.md，取文件走 CDN 不花额度，
+        // 猜错了就是一次 404，比多花一次 API 去列目录划算
+        else if (e.type === 'tree') out.push(`${dirPath}/${e.path}/SKILL.md`);
+      }
+      return out;
+    } catch (e) {
+      if (!isNotFound(e)) {
+        hardErrors.push(`读取 ${dirPath} 的目录树：${e instanceof Error ? e.message : String(e)}`);
+      }
+      return [];
+    }
+  };
+
   // 1. 路径直接指到一个 .md 文件
   if (/\.md$/i.test(t.path)) {
     await tryFile(t.path);
@@ -324,39 +417,71 @@ export async function installFromGithub(
   await tryFile(t.path ? `${t.path}/SKILL.md` : 'SKILL.md');
 
   const entries = await listDir(t.path);
+  const dirs = entries.filter((e) => e.type === 'dir');
+  trace.dirs = dirs.length;
 
   // 3. 路径下其他名字的 md（要求有 frontmatter，避免把普通文档当技能装进来）
-  if (!found.length) {
-    for (const f of mdFilesIn(entries)) {
-      if (nameRank(f.name) >= 9) continue; // README 留到最后一轮
-      await tryFile(f.path, { requireFrontmatter: true });
-    }
+  for (const f of mdFilesIn(entries)) {
+    if (nameRank(f.name) >= 9) continue; // README 留到最后一轮
+    await tryFile(f.path, { requireFrontmatter: true });
   }
 
-  // 4. 下一层的每个目录
-  for (const d of entries.filter((e) => e.type === 'dir').slice(0, 60)) {
+  // 4. 下一层每个目录里的 SKILL.md
+  for (const d of dirs.slice(0, 60)) {
     await tryFile(`${d.path}/SKILL.md`);
   }
 
-  // 5. 仓库根常见的技能目录
-  if (!found.length && !t.path) {
-    for (const guess of ['skills', 'Skills', '.claude/skills']) {
+  /*
+   * 5. 再往深一层。
+   *
+   * 这里踩过一个坑：原来这一步写成「前面都没找到才做」，结果 anthropics/skills
+   * 因为 template/SKILL.md 命中了一个，skills/ 下面那二十几个就再也不看了。
+   * 找到一个不等于找完了 —— 所以现在无条件往下走。
+   *
+   * 顺序上先看名字像技能集合的目录，再看其余的，整体封顶 10 个子树，
+   * 免得在一个大仓库里把 API 额度耗光。
+   */
+  const collectionish = /^(skills?|examples?|templates?|catalog|library|packages|agents?)$/i;
+  const ordered = [
+    ...dirs.filter((d) => collectionish.test(d.name)),
+    ...dirs.filter((d) => !collectionish.test(d.name)),
+  ];
+
+  for (const d of ordered.slice(0, 10)) {
+    if (found.length >= MAX_SKILLS) break;
+    if (!d.sha) continue;
+    const paths = await skillPathsInTree(d.path, d.sha);
+    for (const p of paths.slice(0, 80)) await tryFile(p);
+  }
+
+  // 6. 仓库根的隐藏目录（.claude/skills 这类不会出现在普通列目录里的组合路径）
+  if (!t.path) {
+    for (const guess of ['.claude/skills', 'Skills']) {
+      if (found.length >= MAX_SKILLS) break;
       const sub = await listDir(guess);
-      for (const d of sub.filter((e) => e.type === 'dir').slice(0, 60)) {
+      for (const d of sub.filter((e) => e.type === 'dir').slice(0, 40)) {
         await tryFile(`${d.path}/SKILL.md`);
       }
       for (const f of mdFilesIn(sub)) {
         await tryFile(f.path, { requireFrontmatter: true });
       }
-      if (found.length) break;
     }
   }
 
-  // 6. 最后一招：带 frontmatter 的 README
+  // 7. 最后一招：带 frontmatter 的 README
   if (!found.length) {
     for (const f of mdFilesIn(entries).filter((x) => nameRank(x.name) >= 9)) {
       await tryFile(f.path, { requireFrontmatter: true });
     }
+  }
+
+  onProgress?.(
+    `扫描完成：${trace.dirs} 个子目录、${trace.trees} 棵目录树、试了 ${trace.filesTried} 个文件，` +
+      `找到 ${found.length} 个技能` +
+      (hardErrors.length ? `\n⚠ 过程中有 ${hardErrors.length} 处出错：${hardErrors[0]}` : ''),
+  );
+  if (found.length >= MAX_SKILLS) {
+    onProgress?.(`已达单次安装上限 ${MAX_SKILLS} 个，仓库里可能还有更多 —— 指到具体子目录再装一次`);
   }
 
   if (!found.length) {
@@ -391,4 +516,95 @@ export function skillSystemBlock(skills: Skill[]): string {
         `以下是用户唤起的技能「${s.name}」的指令，本轮请严格按它执行：\n<skill name="${s.name}">\n${s.body}\n</skill>`,
     )
     .join('\n\n');
+}
+
+/* ------------------------------------------------------------------ *
+ * 合并新装的技能
+ *
+ * 三种情况分开处理，而不是一律按名字覆盖：
+ *
+ *   1. 同名、同来源、用户没改过 → 原地更新（这就是「升级」该有的样子）
+ *   2. 同名、用户改过正文       → **不覆盖**，跳过并说明。手改过的东西被一次
+ *                                 重装无声抹掉，是最容易让人失去信任的行为
+ *   3. 同名、但来自另一个仓库   → 两个都留着，新的加后缀。它们是不同的东西，
+ *                                 名字撞车不代表可以互相取代
+ * ------------------------------------------------------------------ */
+
+export interface MergeReport {
+  added: string[];
+  updated: string[];
+  /** 因为用户改过而没有覆盖的 */
+  skipped: string[];
+  /** 同名不同来源，改名保留的 */
+  renamed: { from: string; to: string }[];
+}
+
+export function mergeSkills(
+  existing: Skill[],
+  incoming: Skill[],
+): { skills: Skill[]; report: MergeReport } {
+  const out = [...existing];
+  const report: MergeReport = { added: [], updated: [], skipped: [], renamed: [] };
+
+  for (const inc of incoming) {
+    const i = out.findIndex((s) => s.name === inc.name);
+    if (i < 0) {
+      out.push(inc);
+      report.added.push(inc.name);
+      continue;
+    }
+
+    const cur = out[i];
+
+    // 同名但来自别的地方：不是同一个东西
+    if (cur.source !== inc.source && cur.source !== '手写') {
+      let n = 2;
+      while (out.some((s) => s.name === `${inc.name}-${n}`)) n++;
+      const renamed = { ...inc, name: `${inc.name}-${n}` };
+      out.push(renamed);
+      report.renamed.push({ from: inc.name, to: renamed.name });
+      continue;
+    }
+
+    // 用户手改过：正文跟当初装进来时对不上
+    const userEdited = cur.installedHash ? bodyHash(cur.body) !== cur.installedHash : true;
+    if (userEdited && cur.body.trim() !== inc.body.trim()) {
+      report.skipped.push(cur.name);
+      continue;
+    }
+
+    // 正常升级：保留 id、启用状态和使用次数，换掉正文
+    out[i] = {
+      ...inc,
+      id: cur.id,
+      enabled: cur.enabled,
+      uses: cur.uses,
+      installedAt: cur.installedAt,
+    };
+    report.updated.push(cur.name);
+  }
+
+  return { skills: out, report };
+}
+
+/** 把合并结果讲成人话 */
+export function describeMerge(r: MergeReport): string {
+  const parts: string[] = [];
+  if (r.added.length) parts.push(`新增 ${r.added.length} 个`);
+  if (r.updated.length) parts.push(`更新 ${r.updated.length} 个`);
+  if (r.renamed.length) {
+    parts.push(
+      `${r.renamed.length} 个同名但来自别的仓库，已改名保留（${r.renamed
+        .slice(0, 3)
+        .map((x) => `${x.from}→${x.to}`)
+        .join('、')}）`,
+    );
+  }
+  if (r.skipped.length) {
+    parts.push(
+      `${r.skipped.length} 个你改过正文，没有覆盖（${r.skipped.slice(0, 3).join('、')}）—— ` +
+        '想要上游版本就先删掉本地那个再装',
+    );
+  }
+  return parts.join('；') || '没有变化';
 }

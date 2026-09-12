@@ -23,6 +23,7 @@
     "setup": "npm install && npm run dist:win",
     "typecheck": "tsc --noEmit",
     "check:lite": "node scripts/check-lite.mjs",
+    "sync": "node scripts/sync-github.mjs",
     "build:fast": "vite build",
     "dist:win:fast": "npm run build:fast && electron-builder --win",
     "init-repo": "node scripts/init-repo.mjs",

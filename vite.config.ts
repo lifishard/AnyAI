@@ -94,6 +94,11 @@ function devApiProxy(): Plugin {
 export default defineConfig({
   base: './',
   plugins: [react(), devApiProxy()],
+  // 构建时间戳。界面上显示出来之后，「我跑的是不是最新那个 exe」
+  // 这个问题一眼就能回答 —— 这事已经浪费过两次排查时间。
+  define: {
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
   server: {
     port: 5173,
     strictPort: true,
