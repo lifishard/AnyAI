@@ -465,6 +465,12 @@ export const TOOLS: ToolDef[] = [
         method: { type: 'string', enum: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'] },
         path: { type: 'string', description: '以 / 开头的 API 路径，可带查询串' },
         body: { type: 'object', description: '请求体，GET 时省略' },
+        raw: {
+          type: 'boolean',
+          description:
+            '取文件原文而不是 JSON。读 /repos/owner/name/contents/某文件 时**一定要用这个** —— ' +
+            '否则正文是 base64 包在 JSON 里，大文件会超出返回值限额。',
+        },
       },
       required: ['method', 'path'],
     },

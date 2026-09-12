@@ -3,9 +3,10 @@ const { ok, fail, fetchWithTimeout, clip } = require('./common.cjs');
 
 const API = 'https://api.github.com';
 
-function headers(token) {
+function headers(token, raw) {
   const h = {
-    Accept: 'application/vnd.github+json',
+    // raw 模式直接拿文件原文：不走 base64、不裹 JSON，省掉一整类体积问题
+    Accept: raw ? 'application/vnd.github.raw' : 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
     'User-Agent': 'AnyAI',
   };
@@ -13,8 +14,52 @@ function headers(token) {
   return h;
 }
 
+/**
+ * 把过大的 JSON 压到限额内，**但保证它仍然是合法 JSON**。
+ *
+ * 这是个吃过亏的地方：原来直接 clip 字符串，一个 32KB 的 SKILL.md 经 base64
+ * 变成 43K 字符，被从中间切断 —— 调用方 JSON.parse 直接抛错，表现出来却是
+ * 「仓库里没有这个文件」。截断 JSON 得到的不是短一点的答案，是垃圾。
+ *
+ * 现在：数组按条目截，对象把超大的 content 字段摘掉并打上 _truncated 标记，
+ * 调用方看到标记就知道该改用 raw 模式去取。
+ */
+function fitJson(text, maxChars) {
+  if (text.length <= maxChars) return { text, truncated: false };
+
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return { text: text.slice(0, maxChars), truncated: true, broken: true };
+  }
+
+  if (Array.isArray(data)) {
+    const out = [];
+    let size = 2;
+    for (const item of data) {
+      const chunk = JSON.stringify(item);
+      if (size + chunk.length + 1 > maxChars) break;
+      out.push(item);
+      size += chunk.length + 1;
+    }
+    return { text: JSON.stringify(out), truncated: out.length < data.length };
+  }
+
+  if (data && typeof data === 'object') {
+    const copy = { ...data };
+    delete copy.content; // 文件正文是唯一可能撑爆限额的字段
+    copy._truncated = true;
+    copy._hint = '正文太大，没有随 JSON 返回。用 raw:true 重新取这个路径。';
+    return { text: JSON.stringify(copy), truncated: true };
+  }
+
+  return { text: text.slice(0, maxChars), truncated: true, broken: true };
+}
+
 async function githubApi(args, ctx, secrets) {
   const method = String(args.method || 'GET').toUpperCase();
+  const raw = Boolean(args.raw);
   let p = String(args.path || '').trim();
   if (!p) return fail('path 不能为空');
   if (!p.startsWith('/')) p = `/${p}`;
@@ -26,7 +71,7 @@ async function githubApi(args, ctx, secrets) {
   }
 
   try {
-    const opts = { method, headers: headers(token) };
+    const opts = { method, headers: headers(token, raw) };
     if (method !== 'GET' && method !== 'DELETE' && args.body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(args.body);
@@ -41,6 +86,13 @@ async function githubApi(args, ctx, secrets) {
       return fail(`GitHub 返回 HTTP ${res.status}${extra}：${text.slice(0, 400)}`);
     }
 
+    // raw 模式返回的是文件原文，截断它只是少看几行，不会让结构失效
+    if (raw) {
+      const LIMIT = 400000;
+      const body = text.length > LIMIT ? `${text.slice(0, LIMIT)}\n…（文件过大，已截断）` : text;
+      return ok(body, { summary: `GitHub raw ${p}（${text.length} 字符）` });
+    }
+
     let pretty = text;
     try {
       pretty = JSON.stringify(JSON.parse(text), null, 2);
@@ -48,7 +100,10 @@ async function githubApi(args, ctx, secrets) {
       /* 不是 JSON 就原样返回 */
     }
 
-    return ok(clip(pretty, 40000), { summary: `GitHub ${method} ${p}` });
+    const fitted = fitJson(pretty, 40000);
+    return ok(fitted.text, {
+      summary: `GitHub ${method} ${p}${fitted.truncated ? '（响应过大，已裁剪）' : ''}`,
+    });
   } catch (e) {
     return fail(e);
   }

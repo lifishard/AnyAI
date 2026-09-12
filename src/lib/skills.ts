@@ -192,7 +192,7 @@ interface GhEntry {
   encoding?: string;
 }
 
-async function gh(pathAndQuery: string, ctxLike: unknown): Promise<unknown> {
+async function ghJson(pathAndQuery: string, ctxLike: unknown): Promise<unknown> {
   const res = await getTransport().callTool(
     'github_api',
     { method: 'GET', path: pathAndQuery },
@@ -206,20 +206,54 @@ async function gh(pathAndQuery: string, ctxLike: unknown): Promise<unknown> {
   }
 }
 
-function decodeContent(e: GhEntry): string {
-  if (!e.content) return '';
-  if (e.encoding === 'base64') {
-    const bin = atob(e.content.replace(/\n/g, ''));
-    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
-    return new TextDecoder('utf-8').decode(bytes);
-  }
-  return e.content;
+/**
+ * 取文件原文。
+ *
+ * 走 raw 模式而不是 contents API 的 base64：一个 32KB 的 SKILL.md 经 base64
+ * 会变成 43K 字符，超过工具返回值的限额被截断，然后表现成「仓库里没这个文件」。
+ * raw 拿到的就是文本，没有这一层。
+ */
+async function ghRaw(pathAndQuery: string, ctxLike: unknown): Promise<string> {
+  const res = await getTransport().callTool(
+    'github_api',
+    { method: 'GET', path: pathAndQuery, raw: true },
+    ctxLike as never,
+  );
+  if (!res.ok) throw new Error(res.error ?? 'GitHub 请求失败');
+  return res.content;
+}
+
+/** 这个错误是「文件不存在」还是「请求根本没成功」—— 两者不能混为一谈 */
+function isNotFound(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /HTTP 404/.test(msg);
+}
+
+/** 这份 md 看起来像不像一个技能 */
+function looksLikeSkill(md: string): boolean {
+  const fm = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return false;
+  return /^\s*(name|description)\s*:/im.test(fm[1]);
+}
+
+/** 文件名优先级：SKILL.md 最优先，其次是几个常见叫法 */
+function nameRank(fileName: string): number {
+  const n = fileName.toLowerCase();
+  if (n === 'skill.md') return 0;
+  if (n === 'agent.md' || n === 'agents.md' || n === 'prompt.md') return 1;
+  if (n === 'readme.md') return 9; // 最后才考虑
+  return 5;
 }
 
 /**
- * 到仓库里找 SKILL.md。
- * 先看给定路径本身，再看它下面一层的每个目录 —— 多数技能仓库是
- * skills/<name>/SKILL.md 这种布局。不做深递归，免得把整个仓库爬一遍。
+ * 到仓库里找技能。
+ *
+ * 找的顺序：给定路径本身 → 该路径下的 md 文件 → 下一层每个目录 →
+ * 仓库根的 skills/ 和 .claude/skills/。不做深递归，免得把整个仓库爬一遍。
+ *
+ * **文件名不限定 SKILL.md**：很多作者用别的名字。判据是「有 YAML frontmatter
+ * 且里面有 name 或 description」—— 这是 SKILL.md 格式的实质，文件叫什么是形式。
+ * README.md 排在最后，因为它通常是给人看的介绍而不是给模型的指令。
  */
 export async function installFromGithub(
   input: string,
@@ -232,74 +266,117 @@ export async function installFromGithub(
   const refQ = t.ref ? `?ref=${encodeURIComponent(t.ref)}` : '';
   const base = `/repos/${t.owner}/${t.repo}/contents`;
 
-  onProgress?.(`在 ${t.owner}/${t.repo} 里找 SKILL.md…`);
+  onProgress?.(`在 ${t.owner}/${t.repo} 里找技能…`);
 
   const found: Skill[] = [];
   const seen = new Set<string>();
+  /** 非 404 的失败：限额、网络、权限。这些必须让用户看见，不能当成「没找到」 */
+  const hardErrors: string[] = [];
 
-  const tryFile = async (p: string) => {
-    if (seen.has(p)) return;
+  const tryFile = async (p: string, opts: { requireFrontmatter?: boolean } = {}) => {
+    if (seen.has(p) || found.length >= 20) return;
     seen.add(p);
     try {
-      const e = (await gh(`${base}/${p}${refQ}`, toolCtx)) as GhEntry;
-      if (e && e.type === 'file') {
-        const md = decodeContent(e);
-        if (!md.trim()) return;
-        const parsed = parseSkillMd(md, p.split('/').slice(-2)[0] ?? '');
-        if (!parsed.body.trim()) return;
-        found.push(
-          makeSkill({
-            ...parsed,
-            source: `github:${t.owner}/${t.repo}/${p}`,
-          }),
-        );
-        onProgress?.(`找到 ${parsed.name}`);
+      const md = await ghRaw(`${base}/${p}${refQ}`, toolCtx);
+      if (!md.trim()) return;
+      if (opts.requireFrontmatter && !looksLikeSkill(md)) return;
+
+      // 目录名比文件名更能代表技能名：skills/pdf-export/SKILL.md → pdf-export
+      const segs = p.split('/');
+      const fallback = /^skill\.md$/i.test(segs[segs.length - 1])
+        ? (segs[segs.length - 2] ?? t.repo)
+        : segs[segs.length - 1].replace(/\.md$/i, '');
+
+      const parsed = parseSkillMd(md, fallback);
+      if (!parsed.body.trim()) return;
+      found.push(makeSkill({ ...parsed, source: `github:${t.owner}/${t.repo}/${p}` }));
+      onProgress?.(`找到 ${parsed.name}（${Math.round(md.length / 1024)} KB）`);
+    } catch (e) {
+      if (!isNotFound(e)) {
+        hardErrors.push(`${p}：${e instanceof Error ? e.message : String(e)}`);
       }
-    } catch {
-      /* 这个路径没有就算了 */
     }
   };
 
   const listDir = async (p: string): Promise<GhEntry[]> => {
     try {
-      const r = await gh(`${base}${p ? `/${p}` : ''}${refQ}`, toolCtx);
+      const r = await ghJson(`${base}${p ? `/${p}` : ''}${refQ}`, toolCtx);
       return Array.isArray(r) ? (r as GhEntry[]) : [];
-    } catch {
+    } catch (e) {
+      if (!isNotFound(e)) hardErrors.push(`列目录 ${p || '/'}：${e instanceof Error ? e.message : String(e)}`);
       return [];
     }
   };
 
-  // 1. 路径直接就是一个 SKILL.md
-  if (/SKILL\.md$/i.test(t.path)) {
+  /** 在一个目录里挑出像技能的 md 文件，按文件名优先级排序 */
+  const mdFilesIn = (entries: GhEntry[]): GhEntry[] =>
+    entries
+      .filter((e) => e.type === 'file' && /\.md$/i.test(e.name))
+      .sort((a, b) => nameRank(a.name) - nameRank(b.name));
+
+  // 1. 路径直接指到一个 .md 文件
+  if (/\.md$/i.test(t.path)) {
     await tryFile(t.path);
     if (found.length) return found;
   }
 
-  // 2. 路径下有 SKILL.md
+  // 2. 路径下的 SKILL.md
   await tryFile(t.path ? `${t.path}/SKILL.md` : 'SKILL.md');
 
-  // 3. 路径下每个子目录里找一层
   const entries = await listDir(t.path);
-  const dirs = entries.filter((e) => e.type === 'dir');
-  for (const d of dirs.slice(0, 60)) {
+
+  // 3. 路径下其他名字的 md（要求有 frontmatter，避免把普通文档当技能装进来）
+  if (!found.length) {
+    for (const f of mdFilesIn(entries)) {
+      if (nameRank(f.name) >= 9) continue; // README 留到最后一轮
+      await tryFile(f.path, { requireFrontmatter: true });
+    }
+  }
+
+  // 4. 下一层的每个目录
+  for (const d of entries.filter((e) => e.type === 'dir').slice(0, 60)) {
     await tryFile(`${d.path}/SKILL.md`);
   }
 
-  // 4. 仓库根目录常见的几个技能目录
+  // 5. 仓库根常见的技能目录
   if (!found.length && !t.path) {
     for (const guess of ['skills', 'Skills', '.claude/skills']) {
       const sub = await listDir(guess);
       for (const d of sub.filter((e) => e.type === 'dir').slice(0, 60)) {
         await tryFile(`${d.path}/SKILL.md`);
       }
+      for (const f of mdFilesIn(sub)) {
+        await tryFile(f.path, { requireFrontmatter: true });
+      }
       if (found.length) break;
     }
   }
 
+  // 6. 最后一招：带 frontmatter 的 README
   if (!found.length) {
+    for (const f of mdFilesIn(entries).filter((x) => nameRank(x.name) >= 9)) {
+      await tryFile(f.path, { requireFrontmatter: true });
+    }
+  }
+
+  if (!found.length) {
+    if (hardErrors.length) {
+      // 请求失败和「没有这个文件」是两回事，混着报会让人往错的方向查
+      throw new Error(
+        `访问 ${t.owner}/${t.repo} 时出错了，不是「没有技能」：\n${hardErrors.slice(0, 3).join('\n')}` +
+          (/403|rate limit/i.test(hardErrors.join(' '))
+            ? '\n\n看起来是 GitHub API 限额（不带 token 每小时只有 60 次）。设置 → 工具 → GitHub 填一个 token。'
+            : ''),
+      );
+    }
+    const mdNames = mdFilesIn(entries).map((f) => f.name);
     throw new Error(
-      `在 ${t.owner}/${t.repo}${t.path ? `/${t.path}` : ''} 里没找到 SKILL.md。` +
-        '确认一下路径，或者直接指到某个具体的技能目录。',
+      `在 ${t.owner}/${t.repo}${t.path ? `/${t.path}` : ''} 里没找到技能文件。` +
+        (mdNames.length
+          ? `\n这个路径下有这些 md：${mdNames.slice(0, 8).join('、')} —— 但它们都没有 ` +
+            'YAML frontmatter（开头的 --- 块里要有 name 或 description），所以不像技能。' +
+            '\n可以把地址直接指到某个具体的 .md 文件强制安装。'
+          : '\n这个路径下一个 md 文件都没有。确认路径，或者指到具体的技能目录。'),
     );
   }
   return found;

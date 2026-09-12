@@ -325,7 +325,9 @@ function SkillsTab(props: {
           </div>
         ) : (
           <div className="hint" style={{ marginTop: 6 }}>
-            会找这几个位置的 SKILL.md：给定路径本身、路径下一层的每个目录、仓库根的 skills/ 和 .claude/skills/。
+            会找这几个位置：给定路径本身、路径下的 md 文件、下一层每个目录、仓库根的 skills/ 和
+            .claude/skills/。**文件名不限于 SKILL.md** —— 只要开头的 --- 块里有 name 或 description
+            就认，README.md 排在最后。也可以把地址直接指到某个具体的 .md 文件。
             私有仓库需要在 设置 → 工具 → GitHub 里填 token。
           </div>
         )}
@@ -391,7 +393,10 @@ function SkillsTab(props: {
               />
               <div className="row" style={{ marginTop: 6 }}>
                 <span className="hint" style={{ flex: 1 }}>
-                  来源：{sk.source} · 用过 {sk.uses} 次
+                  来源：{sk.source} · 用过 {sk.uses} 次 · 正文 {Math.round(sk.body.length / 1024)} KB
+                  {sk.body.length > 16000
+                    ? ' ⚠ 这个技能很大，每次唤起都会整段进上下文，注意 token 消耗'
+                    : ''}
                 </span>
                 <button
                   className="btn sm"
