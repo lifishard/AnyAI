@@ -1,0 +1,176 @@
+{
+  "name": "anyai",
+  "version": "1.0.0",
+  "description": "AnyAI — 自带 API Key 的多模型 Agent 桌面客户端：联网查证、读写本地文件、控制 Chrome、调用 Claude Code",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "author": "AnyAI contributors",
+  "license": "Apache-2.0",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env SNC_DEV_URL=http://localhost:5173 electron .\"",
+    "build": "tsc --noEmit && vite build",
+    "start:electron": "electron .",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "cap:sync": "npm run build && cap sync android",
+    "cap:add:android": "npm run build && cap add android && node scripts/install-android-plugin.mjs",
+    "cap:patch": "node scripts/install-android-plugin.mjs",
+    "cap:open": "cap open android",
+    "android:apk": "npm run cap:sync && cd android && gradlew.bat assembleDebug",
+    "setup": "npm install && npm run dist:win",
+    "typecheck": "tsc --noEmit",
+    "build:fast": "vite build",
+    "dist:win:fast": "npm run build:fast && electron-builder --win",
+    "init-repo": "node scripts/init-repo.mjs",
+    "release": "npm run build:fast && electron-builder --publish always"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/preferences": "^7.0.0",
+    "docx": "^9.1.0",
+    "dompurify": "^3.2.4",
+    "highlight.js": "^11.11.1",
+    "mammoth": "^1.9.0",
+    "marked": "^15.0.7",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "ws": "^8.18.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "wait-on": "^8.0.2"
+  },
+  "build": {
+    "appId": "dev.anyai.desktop",
+    "productName": "AnyAI",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "LICENSE",
+      "NOTICE",
+      "!**/*.map"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AnyAI",
+      "runAfterFinish": true
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.productivity",
+      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+      "identity": null,
+      "notarize": false
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "Utility",
+      "maintainer": "AnyAI contributors",
+      "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+    },
+    "copyright": "Copyright 2026 AnyAI contributors, licensed under Apache-2.0",
+    "publish": [
+      {
+        "provider": "github",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "keywords": [
+    "ai",
+    "llm",
+    "chat",
+    "agent",
+    "electron",
+    "openai-compatible",
+    "tool-calling",
+    "desktop",
+    "claude-code",
+    "mcp-like"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lifishard/anyai.git"
+  },
+  "homepage": "https://github.com/lifishard/anyai",
+  "bugs": {
+    "url": "https://github.com/lifishard/anyai/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

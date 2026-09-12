@@ -1,0 +1,19 @@
+AnyAI
+Copyright 2026 AnyAI contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product bundles third-party software. The full dependency list is in
+package.json; each dependency's own license text ships inside node_modules
+and in the packaged application. Components distributed under the Apache
+License, Version 2.0 include:
+
+  - PDF.js (pdfjs-dist)
+    Copyright Mozilla Foundation and contributors
+
+  - SheetJS Community Edition (xlsx)
+    Copyright SheetJS LLC
+
+  - DOMPurify
+    Copyright Dr.-Ing. Mario Heiderich, Cure53
+    (dual licensed: Apache License 2.0 or Mozilla Public License 2.0)

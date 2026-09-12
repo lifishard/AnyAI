@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: 类型检查与构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 这一步是拦截线：类型错在这里挡住，别流到 release 里去。
+      # 本地打包脚本对类型错只警告不阻断（vite 用 esbuild 剥类型，
+      # 类型错不影响能不能跑），但合进主干之前该修干净。
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 构建前端
+        run: npm run build:fast
+
+      # 只打包不出安装器：验证 electron-builder 的配置没写坏，
+      # 又不用花几分钟去压安装包。
+      - name: 验证打包配置
+        run: npx electron-builder --linux --dir
