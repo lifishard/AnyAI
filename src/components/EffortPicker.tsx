@@ -1,4 +1,5 @@
 import React from 'react';
+import type { RouteOverrides } from '../types';
 import { EFFORT_LEVELS, describeEffort, matchMapping, type EffortLevel, type EffortMapping } from '../lib/effort';
 
 /**
@@ -12,6 +13,7 @@ export default function EffortPicker(props: {
   onLevel: (l: EffortLevel) => void;
   model: string;
   mappings: EffortMapping[];
+  route?: RouteOverrides;
   /** thinkingStyle 不是 auto 时，说明用户在配置面板里手动接管了 */
   manual: boolean;
   onOpenMappings: () => void;
@@ -30,13 +32,20 @@ export default function EffortPicker(props: {
 
   const cur = EFFORT_LEVELS.find((l) => l.value === props.level) ?? EFFORT_LEVELS[0];
   const mapping = matchMapping(props.model, props.mappings);
-  const supported = Boolean(mapping && mapping.style !== 'none');
+  const routed = props.route?.effortStyle && props.route.effortStyle !== 'mapping';
+  const supported = routed ? props.route?.effortStyle !== 'none' : Boolean(mapping && mapping.style !== 'none');
+  const describe = (level: EffortLevel) => {
+    if (!routed) return describeEffort(props.model,level,props.mappings);
+    if (level === 'off' || props.route?.effortStyle === 'none') return '当前路由不下发思考字段';
+    const value = props.route?.effortValues?.[level];
+    return value ? `当前路由：${props.route!.effortStyle} → ${value}` : '这一档尚未配置，发送前需要补充';
+  };
 
   return (
     <div className="menu-anchor" ref={anchorRef}>
       <button
         className={`btn sm ghost effort-btn${props.level !== 'off' && supported ? ' on' : ''}`}
-        title={props.manual ? '配置面板里手动接管了思考字段，这里不生效' : describeEffort(props.model, props.level, props.mappings)}
+        title={props.manual ? '配置面板里手动接管了思考字段，这里不生效' : describe(props.level)}
         onClick={() => setOpen((v) => !v)}
       >
         🧠 {props.manual ? '手动' : cur.label}
@@ -66,14 +75,14 @@ export default function EffortPicker(props: {
               <span className="popup-icon">{l.short}</span>
               <span>
                 <strong>{l.label}</strong>
-                <small>{describeEffort(props.model, l.value, props.mappings)}</small>
+                <small>{describe(l.value)}</small>
               </span>
             </button>
           ))}
 
           <div className="picker-foot" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ flex: 1 }}>
-              {mapping
+              {routed ? '使用当前端点与模型的单独设置' : mapping
                 ? `当前模型匹配「${mapping.label}」${mapping.unverified ? '（这条是推的，没实测）' : ''}`
                 : '没有匹配到映射规则'}
             </span>

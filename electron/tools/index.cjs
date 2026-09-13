@@ -14,6 +14,9 @@ const claudecode = require('./claudecode.cjs');
 const knowledge = require('./knowledge.cjs');
 const documents = require('./documents.cjs');
 const computer = require('./computer.cjs');
+const { runtimeStore } = require('../run-store.cjs');
+const { verifyFiles } = require('../file-records.cjs');
+const crypto = require('node:crypto');
 
 /** 按 id 取密钥。工具模块通过这个函数拿，拿不到就返回 null */
 async function secrets(id) {
@@ -25,6 +28,16 @@ async function secrets(id) {
 }
 
 const HANDLERS = {
+  read_tool_result: (a) => {
+    const r = runtimeStore().readResult(String(a.id || ''), a.offset, a.limit);
+    return { ok: true, content: JSON.stringify(r), summary: '读取已保存的工具结果' };
+  },
+  register_outputs: (a, c) => {
+    const r = verifyFiles(Array.isArray(a.paths) ? a.paths : [], c.workspaceRoots);
+    return { ok: r.errors.length === 0 && r.files.length > 0, content: JSON.stringify(r),
+      files: r.files, error: r.errors.map((x) => x.error).join('\n') || undefined,
+      summary: `核实 ${r.files.length} 个交付文件` };
+  },
   web_search: (a, c) => web.webSearch(a, c, secrets),
   fetch_url: (a, c) => web.fetchUrl(a, c),
 
@@ -50,6 +63,7 @@ const HANDLERS = {
   chrome_read_page: (a, c) => chrome.chromeReadPage(a, c),
   chrome_click: (a, c) => chrome.chromeClick(a, c),
   chrome_eval: (a, c) => chrome.chromeEval(a, c),
+  chrome_fetch_json: (a, c) => chrome.chromeFetchJson(a, c),
 
   github_api: (a, c) => github.githubApi(a, c, secrets),
   github_search: (a, c) => github.githubSearch(a, c, secrets),
@@ -76,20 +90,68 @@ const DEFAULT_CTX = {
   projectId: null,
 };
 
-async function runTool(name, args, ctx) {
+async function executeTool(name, args, ctx) {
   const handler = HANDLERS[name];
   if (!handler) return fail(`没有这个工具：${name}`);
 
   const merged = Object.assign({}, DEFAULT_CTX, ctx || {});
   if (!Array.isArray(merged.workspaceRoots)) merged.workspaceRoots = [];
 
+  const input = args && typeof args === 'object' ? args : {};
+  const execution = merged.execution;
+  const journal = execution?.runId && execution?.callId ? runtimeStore() : null;
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ name, args: input })).digest('hex');
+  const readOnly = new Set(['read_tool_result', 'register_outputs', 'web_search', 'fetch_url', 'list_dir',
+    'read_file', 'read_document', 'search_files', 'chrome_tabs', 'chrome_read_page', 'chrome_fetch_json', 'github_search',
+    'project_memory_read', 'project_doc_read', 'skill_list']);
+  if (journal) {
+    const previous = journal.job(execution.runId, execution.callId);
+    if (previous && previous.fingerprint !== fingerprint) return fail('同一工具调用编号对应了不同参数，已停止执行');
+    if (previous?.result) return previous.result;
+    if (previous?.status === 'started' && !readOnly.has(name) && !execution.retryUncertain) {
+      return { ok: false, content: '', uncertain: true,
+        error: '这一步在中断前已开始，但没有可靠的完成记录。请先核实外部结果，再选择跳过或明确允许重试，避免重复操作。' };
+    }
+    journal.saveJob(execution.runId, execution.callId, { fingerprint, name, status: 'started', at: Date.now() });
+  }
   try {
-    const res = await handler(args && typeof args === 'object' ? args : {}, merged);
-    // 保底：任何 handler 都不该返回 undefined
-    return res || fail(`${name} 没有返回结果`);
+    const res = (await handler(input, merged)) || fail(`${name} 没有返回结果`);
+    const outputPaths = [res.filePath, ...(Array.isArray(input.output_files) ? input.output_files : [])].filter(Boolean);
+    const inputPaths = ['read_file', 'read_document'].includes(name) && input.path ? [input.path] : [];
+    const outputs = verifyFiles(outputPaths, merged.workspaceRoots);
+    const inputs = verifyFiles(inputPaths, merged.workspaceRoots, 'input');
+    res.files = [...(res.files || []), ...outputs.files, ...inputs.files];
+    if (outputs.errors.length) {
+      res.content += `\n文件核实失败：${outputs.errors.map((x) => x.error).join('; ')}`;
+      if (res.filePath) delete res.filePath;
+    }
+    if (journal && String(res.content).length > 12000) {
+      const raw = String(res.content);
+      res.resultRef = journal.saveResult(execution.runId, execution.callId, raw);
+      res.content = `${raw.slice(0, 8000)}\n\n[完整结果已保存，${raw.length} 字符；用 read_tool_result(id="${res.resultRef}", offset=8000) 分页读取，不必重新查询。]\n\n${raw.slice(-2000)}`;
+    }
+    if (journal) journal.saveJob(execution.runId, execution.callId, { fingerprint, name, status: 'completed', result: res, at: Date.now() });
+    return res;
   } catch (e) {
+    if (journal) return { ok: false, content: '', uncertain: true,
+      error: `操作执行或完成记录写入时中断，需要核实结果：${e.message}` };
     return fail(e);
   }
 }
 
+// A paused renderer can reconnect while the original native operation still runs.
+// Join that operation even when retry was explicitly allowed; never execute it twice concurrently.
+const activeJobs = new Map();
+async function runTool(name, args, ctx) {
+  const execution = ctx?.execution;
+  if (!execution?.runId || !execution?.callId) return executeTool(name, args, ctx);
+  const key = `${execution.runId}:${execution.callId}`;
+  const fingerprint = JSON.stringify({ name, args });
+  const active = activeJobs.get(key);
+  if (active) return active.fingerprint === fingerprint ? active.promise : fail('同一工具调用编号对应了不同参数，已停止执行');
+  const promise = executeTool(name, args, ctx);
+  activeJobs.set(key, { fingerprint, promise });
+  try { return await promise; }
+  finally { if (activeJobs.get(key)?.promise === promise) activeJobs.delete(key); }
+}
 module.exports = { runTool, TOOL_NAMES: Object.keys(HANDLERS) };

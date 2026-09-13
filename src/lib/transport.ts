@@ -7,6 +7,8 @@ import type {
   ToolContext,
   ToolResult,
   Transport,
+  RunRecord,
+  FileRecord,
 } from '../types';
 import {
   createStreamConsumer,
@@ -14,8 +16,21 @@ import {
   extractErrorMessage,
   type ToolCallDelta,
 } from './sse';
-import { beginExchange, recordRaw } from './wiretap';
-import { isRateLimited, noteRateLimit, noteSuccess, paced } from './pacer';
+import { beginExchange, recordRaw, recordResponse, endExchange, type Exchange } from './wiretap';
+import {
+  isRateLimited,
+  noteRateLimit,
+  noteSuccess,
+  reserveTokens,
+  reconcileTokens,
+  paced,
+  waitForTokens,
+  waitCancellable,
+  abortError,
+  consumeQuota,
+  noteQuotaHeaders,
+  waitForQuota,
+} from './pacer';
 
 /* ================================================================== *
  * 原生桥接的协议
@@ -30,7 +45,7 @@ import { isRateLimited, noteRateLimit, noteSuccess, paced } from './pacer';
 
 interface NativeEvent {
   requestId: string;
-  type: 'chunk' | 'body' | 'done' | 'error';
+  type: 'chunk' | 'body' | 'done' | 'error' | 'raw' | 'response';
   data?: unknown;
   /** type === 'error' 时的上游 HTTP 状态码 */
   status?: number;
@@ -38,6 +53,12 @@ interface NativeEvent {
 
 interface ElectronBridge {
   platform: 'electron';
+  runSave(record: RunRecord): Promise<void>;
+  runList(): Promise<RunRecord[]>;
+  runRemove(id: string): Promise<void>;
+  exchanges(runId?: string): Promise<Exchange[]>;
+  verifyFiles(paths: string[], roots: string[]): Promise<{ files: FileRecord[]; errors: { path: string; error: string }[] }>;
+  saveArtifact(name: string, text?: string, sourcePath?: string): Promise<FileRecord | null>;
   chat(init: ChatRequestInit): Promise<void>;
   abort(requestId: string): Promise<void>;
   getJson(url: string, headers: Record<string, string>, timeoutMs: number): Promise<unknown>;
@@ -231,6 +252,10 @@ export function cloneable(init: ChatRequestInit): ChatRequestInit {
     body: init.body,
     stream: init.stream,
     timeoutMs: init.timeoutMs,
+    runId: init.runId,
+    round: init.round,
+    attempt: init.attempt,
+    purpose: init.purpose,
   };
 }
 
@@ -244,11 +269,12 @@ function paceKeyOf(init: ChatRequestInit): string {
 }
 
 function wireHandlers(h: ChatStreamHandlers, init?: ChatRequestInit) {
-  if (init) beginExchange({ url: init.url, body: init.body, stream: init.stream });
+  if (init) beginExchange(init);
   const acc = createToolCallAccumulator();
   // 最后一个 finish_reason 说了算：多 choice 或带 usage 的收尾包可能各带一个
   let stopReason: string | null = null;
   const consumer = createStreamConsumer({
+    onError: (message, status) => h.onError(message, status),
     onContent: (s) => h.onContent(s),
     onReasoning: (s) => h.onReasoning(s),
     onToolCallDelta: (d: ToolCallDelta[]) => acc.feed(d),
@@ -263,11 +289,11 @@ function wireHandlers(h: ChatStreamHandlers, init?: ChatRequestInit) {
     // 而这个问题恰恰出在「它没看懂的那部分」上
     consumer: {
       chunk(t: string) {
-        recordRaw(t);
+        recordRaw(t, init?.requestId);
         consumer.chunk(t);
       },
       body(t: string) {
-        recordRaw(t);
+        recordRaw(t, init?.requestId);
         consumer.body(t);
       },
       end() {
@@ -280,7 +306,6 @@ function wireHandlers(h: ChatStreamHandlers, init?: ChatRequestInit) {
       if (calls.length) h.onToolCalls(calls);
       // 先报「为什么停」再报 onDone —— 上层要先拿到原因才能决定这轮算不算结束
       h.onStop?.({ reason: stopReason, droppedCalls: acc.droppedCount() });
-      if (init) noteSuccess(paceKeyOf(init));
       h.onDone();
     },
   };
@@ -306,6 +331,13 @@ class ElectronTransport implements Transport {
       const off = this.bridge.onEvent((e) => {
         if (e.requestId !== init.requestId) return;
         switch (e.type) {
+          case 'response':
+            recordResponse(init.requestId, e.status ?? 0, e.data as Record<string, string>);
+            h.onResponse?.(e.status ?? 0, e.data as Record<string, string>);
+            break;
+          case 'raw':
+            recordRaw(String(e.data ?? ''), init.requestId);
+            break;
           case 'chunk':
             consumer.chunk(String(e.data ?? ''));
             break;
@@ -539,8 +571,15 @@ class WebTransport implements Transport {
         signal: ctrl.signal,
       });
 
+      const responseHeaders: Record<string, string> = {};
+      res.headers.forEach((value, key) => {
+        if (/^(content-type|retry-after|x-request-id|x-ratelimit-[a-z-]+|anthropic-ratelimit-[a-z-]+)$/i.test(key)) responseHeaders[key] = value;
+      });
+      recordResponse(init.requestId, res.status, responseHeaders);
+      h.onResponse?.(res.status, responseHeaders);
       if (!res.ok) {
         const text = await res.text();
+        recordRaw(text, init.requestId);
         let parsed: unknown = text;
         try {
           parsed = JSON.parse(text);
@@ -567,7 +606,7 @@ class WebTransport implements Transport {
       finish();
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') {
-        finish();
+        h.onError('请求已停止或响应等待超时');
       } else {
         h.onError(err instanceof Error ? err.message : String(err));
       }
@@ -644,24 +683,75 @@ let cached: Transport | null = null;
  */
 function withPacing(t: Transport): Transport {
   const originalChat = t.chat.bind(t);
-  t.chat = (init: ChatRequestInit, h: ChatStreamHandlers) => {
+  const originalAbort = t.abort.bind(t);
+  const controls = new Map<string, AbortController>();
+  t.abort = async (id) => {
+    controls.get(id)?.abort();
+    await originalAbort(id);
+  };
+  t.chat = async (init: ChatRequestInit, h: ChatStreamHandlers) => {
     const key = paceKeyOf(init);
+    const controller = new AbortController();
+    controls.set(init.requestId, controller);
+    let failed = false;
+    let retryAfter: number | undefined;
     const wrapped: ChatStreamHandlers = {
       ...h,
+      onResponse(status, headers) {
+        noteQuotaHeaders(key,headers);
+        const value = headers['retry-after'];
+        if (value) {
+          const seconds = Number(value);
+          retryAfter = Number.isFinite(seconds) ? seconds * 1000 : Math.max(0, Date.parse(value)-Date.now());
+          if (!Number.isFinite(retryAfter)) retryAfter = undefined;
+        }
+        h.onResponse?.(status, headers);
+      },
+      onUsage(usage) {
+        const tokens = usage.total_tokens ?? ((usage.prompt_tokens ?? 0)+(usage.completion_tokens ?? 0));
+        reconcileTokens(key, init.requestId, tokens);
+        if (usage.prompt_tokens !== undefined) reconcileTokens(`${key}:input`,init.requestId,Math.max(0,usage.prompt_tokens-(init.cachedInputCounts === false ? usage.cached_tokens ?? 0 : 0)));
+        if (usage.completion_tokens !== undefined) reconcileTokens(`${key}:output`,init.requestId,usage.completion_tokens);
+        h.onUsage(usage);
+      },
       onError(message, status) {
-        if (isRateLimited(message, status)) {
-          const next = noteRateLimit(key, parseRetryAfterMs(message));
-          console.info(`[pacer] ${key} 撞到限流，发送间隔调到 ${next}ms`);
+        failed = true;
+        endExchange(init.requestId, message, status);
+        if (!controller.signal.aborted && isRateLimited(message, status)) {
+          noteRateLimit(key, retryAfter ?? parseRetryAfterMs(message));
         }
         h.onError(message, status);
       },
+      onDone() {
+        endExchange(init.requestId);
+        if (!failed && !controller.signal.aborted) noteSuccess(key);
+        h.onDone();
+      },
     };
-    return paced(key, () => originalChat(init, wrapped), {
-      onWait: h.onPaceWait?.bind(h),
-      minIntervalMs: init.paceMinMs,
-      // 用户按了停止就不该还在这儿排队等着
-      aborted: () => false,
-    });
+    try {
+      await paced(key, async () => {
+        const need = init.paceTokens ?? 0;
+        for (;;) {
+          const wait = Math.max(waitForTokens(key, need, init.paceTpm),
+            waitForTokens(`${key}:input`,init.paceInput ?? 0,init.paceItpm),
+            waitForTokens(`${key}:output`,init.paceOutput ?? 0,init.paceOtpm),
+            waitForQuota(key,{ tokens:need,input:init.paceInput ?? 0,output:init.paceOutput ?? 0 }));
+          if (!wait) break;
+          await waitCancellable(wait, controller.signal, h.onPaceWait);
+        }
+        if (controller.signal.aborted) throw abortError();
+        if (need > 0) reserveTokens(key, init.requestId, need);
+        reserveTokens(`${key}:input`,init.requestId,init.paceInput ?? 0);
+        reserveTokens(`${key}:output`,init.requestId,init.paceOutput ?? 0);
+        consumeQuota(key,{ tokens:need,input:init.paceInput ?? 0,output:init.paceOutput ?? 0 });
+        h.onDispatch?.();
+        await originalChat(init, wrapped);
+      }, { onWait: h.onPaceWait, minIntervalMs: init.paceMinMs, signal: controller.signal });
+    } catch (err) {
+      if (!failed) wrapped.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (controls.get(init.requestId) === controller) controls.delete(init.requestId);
+    }
   };
   return t;
 }

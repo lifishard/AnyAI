@@ -6,6 +6,7 @@ import type {
   ModelHealthStatus,
   ModelInfo,
 } from '../types';
+import { quotaKey } from './adaptive';
 import { buildHeaders, endpoint } from './api';
 import { getTransport } from './transport';
 import { classifyError } from './errors';
@@ -228,7 +229,7 @@ async function probeOne(
        * 聊天一边点体检，两条队伍互相看不见，加起来就把配额打爆了。
        * 配额是按凭据算的，队伍也必须按凭据分。
        */
-      paceKey: profile.id,
+      paceKey: quotaKey(profile),
       paceMinMs: pacingFloor(limitOf?.(modelId), 32),
     },
     {
@@ -259,7 +260,7 @@ async function probeOne(
   if (isRateLimited(msg, failStatus)) {
     onLearnLimit?.(modelId, {
       ...parseRateLimits(msg),
-      minIntervalMs: paceOf(profile.id).intervalMs,
+      minIntervalMs: paceOf(quotaKey(profile)).intervalMs,
       at: Date.now(),
       from: msg.slice(0, 300),
     });

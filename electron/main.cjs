@@ -9,6 +9,8 @@ const remote = require('./remote-server.cjs');
 const chromeLaunch = require('./chrome-launch.cjs');
 const skillFolder = require('./skill-folder.cjs');
 const attachments = require('./attachments.cjs');
+const { runtimeStore } = require('./run-store.cjs');
+const { verifyFiles } = require('./file-records.cjs');
 
 const DEV_URL = process.env.SNC_DEV_URL || '';
 const isDev = Boolean(DEV_URL);
@@ -201,60 +203,67 @@ function emit(sender, requestId, type, data, status) {
 async function handleChat(evt, init) {
   const sender = evt.sender;
   const { requestId, url, headers, body, stream, timeoutMs } = init;
-
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort('timeout'), timeoutMs || 180000);
-  inflight.set(requestId, { controller, timer });
-
+  const exchange = { requestId, runId: init.runId, round: init.round, attempt: init.attempt,
+    purpose: init.purpose || 'agent', at: Date.now(), url, stream, request: body,
+    raw: '', truncated: false, responseHeaders: {}, status: undefined };
+  const save = () => { try { runtimeStore().saveExchange(exchange); } catch (e) { console.error('请求诊断保存失败', e.message); } };
+  const raw = (text) => {
+    const room = 256000 - exchange.raw.length;
+    exchange.raw += text.slice(0, Math.max(0, room));
+    if (text.length > room) exchange.truncated = true;
+  };
+  let timer;
+  const touch = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort('timeout'), timeoutMs || 180000);
+    inflight.set(requestId, { controller, timer });
+  };
+  touch(); save();
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    const ctype = (res.headers.get('content-type') || '').toLowerCase();
-    const isSse = ctype.includes('text/event-stream');
-
+    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
+    exchange.status = res.status;
+    // Only response metadata useful for diagnostics; never cookies or credentials.
+    for (const [key, value] of res.headers) {
+      if (/^(content-type|retry-after|x-request-id|request-id|x-ratelimit-[a-z-]+|anthropic-ratelimit-[a-z-]+)$/i.test(key)) exchange.responseHeaders[key] = value;
+    }
+    emit(sender, requestId, 'response', exchange.responseHeaders, res.status);
+    touch();
+    const isSse = (res.headers.get('content-type') || '').toLowerCase().includes('text/event-stream');
     if (!res.ok) {
-      const text = await res.text();
+      const text = await res.text(); raw(text);
+      emit(sender, requestId, 'raw', text, res.status);
       let parsed = text;
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        /* 保持原文 */
-      }
-      emit(sender, requestId, 'error', extractErrorMessage(parsed, `HTTP ${res.status}`), res.status);
+      try { parsed = JSON.parse(text); } catch { /* preserve original error */ }
+      exchange.error = extractErrorMessage(parsed, `HTTP ${res.status}`);
+      emit(sender, requestId, 'error', exchange.error, res.status);
       return;
     }
-
-    // 要了流式但服务端给整包 JSON —— 当非流式处理
     if (!stream || !isSse || !res.body) {
-      emit(sender, requestId, 'body', await res.text());
-      emit(sender, requestId, 'done');
-      return;
+      const text = await res.text(); raw(text);
+      emit(sender, requestId, 'body', text);
+      emit(sender, requestId, 'done'); return;
     }
-
     const decoder = new TextDecoder();
     const reader = res.body.getReader();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      emit(sender, requestId, 'chunk', decoder.decode(value, { stream: true }));
+      touch();
+      const text = decoder.decode(value, { stream: true }); raw(text);
+      emit(sender, requestId, 'chunk', text);
     }
+    const tail = decoder.decode();
+    if (tail) { raw(tail); emit(sender, requestId, 'chunk', tail); }
     emit(sender, requestId, 'done');
   } catch (err) {
-    const aborted = err && (err.name === 'AbortError' || String(err).includes('abort'));
-    if (aborted) {
-      // 用户主动停止：当正常结束，已经流出来的内容保留
-      emit(sender, requestId, 'done');
-    } else {
-      emit(sender, requestId, 'error', err && err.message ? err.message : String(err));
-    }
+    exchange.error = controller.signal.aborted
+      ? controller.signal.reason === 'timeout' ? '响应等待超时（连续无数据）' : '请求已停止'
+      : err?.message || String(err);
+    emit(sender, requestId, 'error', exchange.error);
   } finally {
-    clearTimeout(timer);
-    inflight.delete(requestId);
+    clearTimeout(timer); inflight.delete(requestId);
+    exchange.endedAt = Date.now(); save();
   }
 }
 
@@ -282,6 +291,19 @@ async function handleGetJson(_evt, { url, headers, timeoutMs }) {
  * ------------------------------------------------------------------ */
 
 function registerIpc() {
+  ipcMain.handle('snc:runSave', (_e, record) => runtimeStore().save(record));
+  ipcMain.handle('snc:runList', () => runtimeStore().list());
+  ipcMain.handle('snc:runRemove', (_e, id) => runtimeStore().remove(id));
+  ipcMain.handle('snc:exchanges', (_e, runId) => runtimeStore().exchanges(runId));
+  ipcMain.handle('snc:verifyFiles', (_e, { paths, roots }) => verifyFiles(paths, roots));
+  ipcMain.handle('snc:saveArtifact', async (_e, { name, text, sourcePath }) => {
+    const chosen = await dialog.showSaveDialog(mainWindow, { defaultPath: path.join(app.getPath('downloads'), path.basename(name || 'output.txt')) });
+    if (chosen.canceled || !chosen.filePath) return null;
+    const fs = require('node:fs');
+    if (sourcePath) fs.copyFileSync(sourcePath, chosen.filePath);
+    else fs.writeFileSync(chosen.filePath, String(text ?? ''), 'utf8');
+    return verifyFiles([chosen.filePath], [path.dirname(chosen.filePath)]).files[0];
+  });
   ipcMain.handle('snc:chat', handleChat);
   ipcMain.handle('snc:getJson', handleGetJson);
 
@@ -338,6 +360,7 @@ function registerIpc() {
 
   // 产物：在文件夹里定位 / 用默认程序打开 / 读回来预览
   ipcMain.handle('snc:revealPath', (_e, p) => {
+    if (!require('node:fs').existsSync(p)) throw new Error('文件不存在或已被移动：' + p);
     shell.showItemInFolder(p);
   });
   ipcMain.handle('snc:openPath', async (_e, p) => {

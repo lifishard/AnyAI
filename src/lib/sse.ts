@@ -41,7 +41,7 @@ export function createSseParser(onData: (payload: string) => void) {
 
   return {
     feed(chunk: string) {
-      buf += chunk.replace(/\r\n/g, '\n');
+      buf = (buf + chunk).replace(/\r\n/g, '\n');
       let idx: number;
       while ((idx = buf.indexOf('\n\n')) !== -1) {
         const raw = buf.slice(0, idx);
@@ -82,6 +82,7 @@ function pickUsage(o: unknown): Usage | undefined {
   // 缓存命中的字段名各家不一样：OpenAI 塞在 prompt_tokens_details.cached_tokens，
   // DeepSeek 叫 prompt_cache_hit_tokens，Moonshot 直接给 cached_tokens
   const details = (u.prompt_tokens_details ?? {}) as Record<string, unknown>;
+  const completionDetails = (u.completion_tokens_details ?? {}) as Record<string, unknown>;
   const cached =
     n('cached_tokens') ??
     n('prompt_cache_hit_tokens') ??
@@ -92,12 +93,13 @@ function pickUsage(o: unknown): Usage | undefined {
     completion_tokens: n('completion_tokens') ?? n('output_tokens'),
     total_tokens: n('total_tokens'),
     cached_tokens: cached,
+    reasoning_tokens: typeof completionDetails.reasoning_tokens === 'number' ? completionDetails.reasoning_tokens : n('reasoning_tokens'),
   };
   if (
     usage.prompt_tokens === undefined &&
     usage.completion_tokens === undefined &&
     usage.total_tokens === undefined &&
-    usage.cached_tokens === undefined
+    usage.cached_tokens === undefined && usage.reasoning_tokens === undefined
   ) {
     return undefined;
   }
@@ -248,6 +250,7 @@ export function createStreamConsumer(h: {
   onToolCallDelta(d: ToolCallDelta[]): void;
   onUsage(u: Usage): void;
   onFinishReason?(reason: string): void;
+  onError?(message: string, status?: number): void;
 }) {
   const parser = createSseParser((payload) => {
     if (payload === '[DONE]') return;
@@ -261,6 +264,11 @@ export function createStreamConsumer(h: {
   });
 
   function apply(json: unknown) {
+    const packet = json as { error?: unknown; code?: number; message?: string } | null;
+    if (packet?.error || (packet?.code && packet.code !== 200 && packet.message)) {
+      h.onError?.(extractErrorMessage(json, '上游流中返回错误'));
+      return;
+    }
     const d = normalizeDelta(json);
     if (d.reasoning) h.onReasoning(d.reasoning);
     if (d.content) h.onContent(d.content);

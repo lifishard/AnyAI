@@ -8,6 +8,12 @@ const { contextBridge, ipcRenderer } = require('electron');
  */
 contextBridge.exposeInMainWorld('snc', {
   platform: 'electron',
+  runSave: (record) => ipcRenderer.invoke('snc:runSave', record),
+  runList: () => ipcRenderer.invoke('snc:runList'),
+  runRemove: (id) => ipcRenderer.invoke('snc:runRemove', id),
+  exchanges: (runId) => ipcRenderer.invoke('snc:exchanges', runId),
+  verifyFiles: (paths, roots) => ipcRenderer.invoke('snc:verifyFiles', { paths, roots }),
+  saveArtifact: (name, text, sourcePath) => ipcRenderer.invoke('snc:saveArtifact', { name, text, sourcePath }),
 
   chat: (init) => ipcRenderer.invoke('snc:chat', init),
   abort: (requestId) => ipcRenderer.invoke('snc:abort', requestId),

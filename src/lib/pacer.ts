@@ -1,198 +1,184 @@
-/* ------------------------------------------------------------------ *
- * 发送节奏控制
- *
- * 用户的原话：「有没有什么比较好的策略可以保持连线又不过量？连续、稳定的
- * 工作是第一位的。」
- *
- * 有的，而且这件事三十年前就被解决过一次 —— TCP 的拥塞控制。核心思想是
- * **不去猜对方的容量，而是不断试探并对反馈做出反应**：
- *
- *   顺利  → 一点一点加快（加性增大）
- *   被拒  → 立刻大幅放慢（乘性减小）
- *
- * 为什么不是「读文档上的 RPM 然后按它发」：
- *   - BYOK 客户端根本不知道这条路由的真实配额，聚合网关更是随时在变；
- *   - 同一把 key 可能同时在别的地方用着，配额是共享的；
- *   - 就算知道 60 RPM，按 60 发也一定会撞 —— 服务端的窗口和你的不对齐。
- *
- * 所以这里只做一件事：**记住上次发送的时间，并动态调整两次发送的最小间隔**。
- * 撞到限流就把间隔翻倍，一路顺利就慢慢往回收。它不需要知道配额是多少，
- * 自己会收敛到那条线下面一点的位置。
- *
- * ── 为什么「稳」比「快」重要 ──
- *
- * 一个 22 步的任务，用 1 秒一次的节奏冲，撞限流后退避、重试、再撞，实际
- * 耗时往往比老老实实 3 秒一次还长 —— 而且中途任何一次退避用尽都会让整个
- * 任务报废。稳定的慢，是比不稳定的快更快的。
- * ------------------------------------------------------------------ */
-
+/** Shared request queue, cancellation and a rolling minute ledger. */
 export interface PaceState {
-  /** 两次发送之间至少隔多久（毫秒） */
   intervalMs: number;
-  /** 上一次实际发出去的时刻 */
   lastSentAt: number;
-  /** 连续顺利多少次了 —— 攒够一批才敢加速 */
   streak: number;
-  /** 撞过多少次限流，只用来在界面上说明情况 */
   hits: number;
+  blockedUntil?: number;
+  remaining?: Partial<Record<'requests' | 'tokens' | 'input' | 'output', { value: number; resetAt: number }>>;
 }
-
-/** 起步间隔：不为难任何一条线路，也不至于慢到烦人 */
-const START_MS = 350;
-/** 最快到什么程度为止。再快没意义 —— 瓶颈早就在模型生成上了 */
-const FLOOR_MS = 200;
-/** 最慢到什么程度为止。再慢不如直接告诉用户换条路由 */
-const CEIL_MS = 20_000;
-/** 连续顺利这么多次，才把间隔往回收一点 */
-const SPEEDUP_AFTER = 3;
-
+interface Spent { id: string; at: number; tokens: number }
+const WINDOW_MS = 60_000;
+const STORAGE_KEY = 'anyai:rate-ledger:v2';
 const states = new Map<string, PaceState>();
-
+const spent = new Map<string, Spent[]>();
+const chains = new Map<string, Promise<void>>();
+let serial = 0;
+try {
+  const saved = JSON.parse(globalThis.localStorage?.getItem(STORAGE_KEY) || '{}');
+  for (const [key, value] of Object.entries(saved.states ?? {})) {
+    const s = value as PaceState;
+    if (Number.isFinite(s.lastSentAt) && Date.now() - s.lastSentAt < 300_000) states.set(key, s);
+  }
+  for (const [key, value] of Object.entries(saved.spent ?? {})) {
+    if (Array.isArray(value)) spent.set(key, value.filter((x) =>
+      typeof x.id === 'string' && Number.isFinite(x.tokens) && Date.now() - x.at < WINDOW_MS));
+  }
+} catch { /* Storage is optional; never store API keys here. */ }
+function persist() {
+  try { globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify({
+    states: Object.fromEntries(states), spent: Object.fromEntries(spent),
+  })); } catch { /* Rate accounting still works in memory. */ }
+}
 function stateOf(key: string): PaceState {
   let s = states.get(key);
-  if (!s) {
-    s = { intervalMs: START_MS, lastSentAt: 0, streak: 0, hits: 0 };
-    states.set(key, s);
-  }
+  if (!s) { s = { intervalMs: 350, lastSentAt: 0, streak: 0, hits: 0 }; states.set(key, s); }
   return s;
 }
-
-export function paceOf(key: string): PaceState {
-  return { ...stateOf(key) };
+export function paceOf(key: string): PaceState { return { ...stateOf(key) }; }
+export function resetDeadline(value: string | undefined, now = Date.now()): number | undefined {
+  if (!value) return undefined;
+  if (/^\d+(?:\.\d+)?$/.test(value)) return now+Number(value)*1000;
+  const parts = [...value.matchAll(/(\d+(?:\.\d+)?)\s*(ms|s|m|h)/g)];
+  if (parts.length && parts.map(m => m[0]).join('') === value.replace(/\s/g,'')) {
+    return now+parts.reduce((n,m) => n+Number(m[1])*({ ms:1,s:1000,m:60000,h:3600000 }[m[2]] ?? 0),0);
+  }
+  const date = Date.parse(value); return Number.isFinite(date) ? date : undefined;
 }
-
-/** 主要给测试用：把某条线路的节奏清回初始值 */
-export function resetPace(key?: string): void {
-  if (key) states.delete(key);
-  else states.clear();
+export function noteQuotaHeaders(key: string, headers: Record<string,string>, now = Date.now()): void {
+  const s = stateOf(key); s.remaining ??= {};
+  for (const [dimension, suffix] of [['requests','requests'],['tokens','tokens'],['input','input-tokens'],['output','output-tokens']] as const) {
+    const prefix = headers[`x-ratelimit-remaining-${suffix}`] !== undefined ? 'x-ratelimit' : 'anthropic-ratelimit';
+    const raw = headers[`${prefix}-${prefix === 'x-ratelimit' ? `remaining-${suffix}` : `${suffix}-remaining`}`];
+    if (raw === undefined || !Number.isFinite(Number(raw)) || Number(raw) < 0) continue;
+    const reset = headers[`${prefix}-${prefix === 'x-ratelimit' ? `reset-${suffix}` : `${suffix}-reset`}`];
+    s.remaining[dimension] = { value: Number(raw), resetAt: resetDeadline(reset,now) ?? now+60000 };
+  }
+  persist();
 }
-
-/**
- * 撞到限流了。
- *
- * 乘性减小：直接翻倍，不是加一点点 —— 已经撞上说明当前节奏就是错的，
- * 慢慢往回挪只会一路继续撞。上游给了 Retry-After 就听它的，它比我们准。
- */
+export function waitForQuota(key: string, want: { tokens: number; input: number; output: number }, now = Date.now()): number {
+  const remaining = stateOf(key).remaining ?? {};
+  return Math.max(0,...Object.entries({ requests:1,...want }).map(([k,n]) => {
+    const entry = remaining[k as keyof typeof remaining];
+    return entry && entry.value < n && entry.resetAt > now ? entry.resetAt-now+250 : 0;
+  }));
+}
+export function consumeQuota(key: string, want: { tokens: number; input: number; output: number }): void {
+  const remaining = stateOf(key).remaining ?? {};
+  for (const [k,n] of Object.entries({ requests:1,...want })) {
+    const entry = remaining[k as keyof typeof remaining];
+    if (entry && entry.resetAt > Date.now()) entry.value = Math.max(0,entry.value-n);
+  }
+  persist();
+}
+export function resetPace(key?: string): void { if (key) states.delete(key); else states.clear(); persist(); }
 export function noteRateLimit(key: string, retryAfterMs?: number): number {
   const s = stateOf(key);
-  s.hits++;
-  s.streak = 0;
-  const doubled = Math.min(CEIL_MS, Math.max(START_MS, s.intervalMs * 2));
-  s.intervalMs = retryAfterMs ? Math.min(CEIL_MS, Math.max(doubled, retryAfterMs)) : doubled;
-  return s.intervalMs;
+  s.hits++; s.streak = 0;
+  s.intervalMs = Math.min(20_000, Math.max(700, s.intervalMs * 2));
+  // Retry-After is a deadline, not an interval to cap at twenty seconds.
+  const delay = retryAfterMs ?? 62_000;
+  s.blockedUntil = Math.max(s.blockedUntil ?? 0, Date.now() + Math.max(0, delay));
+  persist();
+  return delay;
 }
-
-/**
- * 这次顺利。
- *
- * 加性减小间隔，而且要连着顺利几次才动 —— 撞完立刻就往回冲，
- * 等于在限流的边缘反复横跳，体感比全程慢速还糟。
- */
 export function noteSuccess(key: string): void {
   const s = stateOf(key);
-  if (++s.streak < SPEEDUP_AFTER) return;
-  s.streak = 0;
-  s.intervalMs = Math.max(FLOOR_MS, Math.round(s.intervalMs * 0.75));
+  if (++s.streak >= 3) { s.streak = 0; s.intervalMs = Math.max(200, Math.round(s.intervalMs * 0.75)); }
+  persist();
 }
-
-/**
- * 排在这条线路的队尾，轮到了再发。
- *
- * 同一把 key 上的请求**串行**通过这里。并发发三个然后各自退避，是把
- * 一次限流变成三次的最快方法。串行不会更慢：真正的耗时在模型生成上，
- * 而那部分本来就是一个接一个的。
- */
-const chains = new Map<string, Promise<unknown>>();
-
-export async function paced<T>(
-  key: string,
-  fn: () => Promise<T>,
-  opts: {
-    onWait?: (ms: number) => void;
-    aborted?: () => boolean;
-    /**
-     * 这一次至少隔这么久再发，即使当前节奏比它快。
-     *
-     * 给排查那类「宁可慢也绝不能触发限流」的场景用：只有当一串请求在设计上
-     * 就不可能把配额打爆时，它返回的限流才是**信号**而不是自己造出来的噪音。
-     */
-    minIntervalMs?: number;
-  } = {},
-): Promise<T> {
+export function abortError(): Error {
+  const e = new Error('请求已停止'); e.name = 'AbortError'; return e;
+}
+export async function waitCancellable(ms: number, signal?: AbortSignal, onWait?: (ms: number) => void): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw abortError();
+    const left = deadline - Date.now();
+    onWait?.(left);
+    await new Promise<void>((resolve, reject) => {
+      const stop = () => { clearTimeout(timer); signal?.removeEventListener('abort', stop); reject(abortError()); };
+      const timer = setTimeout(() => { signal?.removeEventListener('abort', stop); resolve(); }, Math.min(1000, left));
+      signal?.addEventListener('abort', stop, { once: true });
+      if (signal?.aborted) stop();
+    });
+  }
+  if (signal?.aborted) throw abortError();
+}
+export async function paced<T>(key: string, fn: () => Promise<T>, opts: {
+  onWait?: (ms: number) => void;
+  aborted?: () => boolean;
+  signal?: AbortSignal;
+  minIntervalMs?: number;
+} = {}): Promise<T> {
   const prev = chains.get(key) ?? Promise.resolve();
   let release!: () => void;
-  chains.set(
-    key,
-    new Promise<void>((r) => {
-      release = r;
-    }),
-  );
-  await prev.catch(() => {});
-
+  const gate = new Promise<void>((r) => { release = r; });
+  // A cancelled waiter must not allow the next waiter to overtake the active request.
+  const tail = prev.catch(() => {}).then(() => gate);
+  chains.set(key, tail);
+  let removeAbort = () => {};
   try {
+    await Promise.race([prev, new Promise<never>((_, reject) => {
+      const stop = () => reject(abortError());
+      opts.signal?.addEventListener('abort', stop, { once: true });
+      removeAbort = () => opts.signal?.removeEventListener('abort', stop);
+      if (opts.signal?.aborted) stop();
+    })]);
+    if (opts.signal?.aborted || opts.aborted?.()) throw abortError();
     const s = stateOf(key);
     const floor = Math.max(s.intervalMs, opts.minIntervalMs ?? 0);
-    // 注意第一次也要等：上一个请求可能刚由别处发出去，lastSentAt 是共享的
-    const wait = s.lastSentAt ? floor - (Date.now() - s.lastSentAt) : 0;
-    if (wait > 0) {
-      // 只有等得久到人能察觉时才提示，不然满屏都是「等待 40ms」
-      if (wait > 700) opts.onWait?.(wait);
-      const step = 100;
-      for (let left = wait; left > 0; left -= step) {
-        if (opts.aborted?.()) break;
-        await new Promise((r) => setTimeout(r, Math.min(step, left)));
-      }
-    }
-    s.lastSentAt = Date.now();
+    const wait = Math.max(0, (s.lastSentAt ? s.lastSentAt + floor : 0) - Date.now(), (s.blockedUntil ?? 0) - Date.now());
+    if (wait) await waitCancellable(wait, opts.signal, opts.onWait);
+    if (opts.signal?.aborted || opts.aborted?.()) throw abortError();
+    s.lastSentAt = Date.now(); persist();
     return await fn();
   } finally {
-    release();
-    // 链子上最后一个走完就把它清掉，不然 key 会一直挂着一个已完成的 Promise
-    if (chains.get(key) === undefined) chains.delete(key);
+    removeAbort(); release();
+    void tail.then(() => { if (chains.get(key) === tail) chains.delete(key); });
   }
 }
-
-/** 限流的说法各家不一样，这里只认最通用的那几种 */
-const RATE_LIMITED =
-  /rate.?limit|rpm|tpm|qps|quota.{0,12}(exceed|exhaust)|exhausted|too many requests|429|请求过于频繁|并发|限流/i;
-
-export function isRateLimited(msg: string, status?: number): boolean {
-  return status === 429 || RATE_LIMITED.test(msg || '');
-}
-
-/** 给界面用的一句话 */
+const RATE_LIMITED = /rate.?limit|\brpm\b|\btpm\b|qps|quota.{0,12}(exceed|exhaust)|too many requests|429|请求过于频繁|并发|限流/i;
+export function isRateLimited(msg: string, status?: number): boolean { return status === 429 || RATE_LIMITED.test(msg || ''); }
 export function describePace(key: string): string {
   const s = stateOf(key);
-  if (!s.hits) return `发送间隔 ${s.intervalMs}ms（没撞过限流）`;
-  return `发送间隔 ${s.intervalMs}ms —— 撞过 ${s.hits} 次限流，已自动放慢；一路顺利会慢慢收回去`;
+  return `发送间隔 ${s.intervalMs}ms；已避让限流 ${s.hits} 次`;
 }
-
-
-/* ------------------------------------------------------------------ *
- * 按 token 算的节奏
- *
- * RPM（每分钟请求数）和 TPM（每分钟 token 数）是两条独立的线，撞哪条都叫限流。
- * 只按请求数排队，对付 RPM 够了，对付 TPM 完全没用 —— 一条 10K token 的请求
- * 顶得上一百条 hi。
- *
- * 这是被自己打脸打出来的：排查工具的字段阶段每次只发一个 hi，3 秒一次绰绰有余；
- * 到了历史阶段每次发一万多 token，同样 3 秒一次，六次就把 TPM 撞穿了。
- * 「设计成不可能触发限流」这条原则，必须按**实际发出去的量**来算才成立。
- * ------------------------------------------------------------------ */
-
-/**
- * 不知道真实 TPM 时的保守假设。
- * 宁可偏小：估小了只是慢一点，估大了就会撞线 —— 而撞线正是要避免的那件事。
- */
 export const ASSUMED_TPM = 20_000;
-
-/** 发这么多 token，两次之间至少要隔多久才不会碰到 TPM */
 export function spacingForTokens(tokens: number, tpm = ASSUMED_TPM): number {
-  if (tokens <= 0 || tpm <= 0) return 0;
-  return Math.ceil((tokens / tpm) * 60_000);
+  return tokens > 0 && tpm > 0 ? Math.ceil(tokens / tpm * 60_000) : 0;
 }
-
-/** 撞的是 token 那条线还是请求数那条线 —— 两者该等的时长差一个数量级 */
-export function isTokenLimit(msg: string): boolean {
-  return /tpm|token.{0,16}(per|\/)\s*min|每分钟.{0,8}token|token.{0,8}限制/i.test(msg || '');
+export function isTokenLimit(msg: string): boolean { return /tpm|token.{0,16}(per|\/)\s*min|每分钟.{0,8}token|token.{0,8}限制/i.test(msg || ''); }
+function recent(key: string, now: number): Spent[] {
+  const list = (spent.get(key) ?? []).filter((x) => now - x.at < WINDOW_MS);
+  spent.set(key, list); return list;
 }
+export function tokensInWindow(key: string, now = Date.now()): number { return recent(key, now).reduce((a,b) => a+b.tokens, 0); }
+export function reserveTokens(key: string, id: string, tokens: number): void {
+  if (tokens <= 0) return;
+  const list = recent(key, Date.now());
+  const existing = list.find((x) => x.id === id);
+  if (existing) existing.tokens = tokens;
+  else list.push({ id, at: Date.now(), tokens });
+  persist();
+}
+/** Usage replaces this request's reservation; repeated cumulative usage is not added twice. */
+export function reconcileTokens(key: string, id: string, tokens: number): void {
+  if (!Number.isFinite(tokens) || tokens < 0) return;
+  const list = recent(key, Date.now());
+  const existing = list.find((x) => x.id === id);
+  if (existing) existing.tokens = tokens;
+  else list.push({ id, at: Date.now(), tokens });
+  persist();
+}
+export function noteTokens(key: string, tokens: number): void { reserveTokens(key, `legacy-${++serial}`, tokens); }
+export function waitForTokens(key: string, want: number, tpm?: number, now = Date.now()): number {
+  if (!tpm || tpm <= 0 || want <= 0) return 0;
+  if (want > tpm) throw new Error(`单次请求预算 ${want} token 超过整分钟额度 ${tpm}。请缩小上下文或输出预算；等待不能解决。`);
+  const list = recent(key, now).sort((a,b) => a.at-b.at);
+  let used = list.reduce((a,b) => a+b.tokens, 0);
+  if (used + want <= tpm) return 0;
+  for (const item of list) { used -= item.tokens; if (used + want <= tpm) return Math.max(0, item.at + WINDOW_MS + 250 - now); }
+  return 0;
+}
+export function resetTokens(key?: string): void { if (key) spent.delete(key); else spent.clear(); persist(); }

@@ -43,8 +43,8 @@ function parseRetryAfter(msg: string): number | undefined {
   if (!Number.isFinite(n) || n <= 0) return undefined;
   const unit = m[2].toLowerCase();
   const ms = unit === 'ms' ? n : unit.startsWith('m') && unit !== 'ms' ? n * 60_000 : n * 1000;
-  // 上游说要等超过两分钟的，那不是「稍等重试」能解决的，交给用户决定
-  return ms > 0 && ms <= 120_000 ? ms : undefined;
+  // 保留上游等待时间，是否超过自动恢复预算由任务执行器决定。
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
 }
 
 /**
@@ -107,6 +107,10 @@ export function classifyError(
     extra: Partial<ErrorInfo> = {},
   ): ErrorInfo => ({ ...base, kind, title, fixes, ...extra });
 
+  // SSE 中的错误可能没有 HTTP 错误状态，仍应正确识别限流。
+  if (status === undefined && /rate.?limit|tpm|rpm|too many requests|限流/i.test(msg)) {
+    return mk('rate_limit', '暂时达到调用额度，等待后继续', [], { retryable: true, retryAfterMs: parseRetryAfter(msg) });
+  }
   /* ---------------- 网络层：请求根本没出去 ---------------- */
 
   if (status === undefined) {
@@ -313,7 +317,7 @@ export function classifyError(
 
 /** 第 n 次重试要等多久：指数退避 + 抖动，上游指定了就听上游的 */
 export function backoffMs(attempt: number, info: { retryAfterMs?: number }): number {
-  if (info.retryAfterMs) return Math.min(info.retryAfterMs + 250, 30_000);
+  if (info.retryAfterMs) return Math.max(0, info.retryAfterMs) + 250;
   const base = Math.min(1500 * 2 ** (attempt - 1), 15_000);
   return Math.round(base * (0.8 + Math.random() * 0.4)); // ±20% 抖动，避免多个请求同时回来
 }

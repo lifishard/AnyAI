@@ -201,6 +201,7 @@ export function defaultGenerationConfig(): GenerationConfig {
     enabledTools: [...DEFAULT_ENABLED_TOOLS],
     maxToolRounds: 30,
     approvalMode: 'ask',
+    runtime: { contextMode: 'auto', semanticCompression: true, milestones: true, contextTokens: 24000, tpm: 0, rpm: 0, maxTokens: 300000, maxMinutes: 60, recoveryMinutes: 15 },
   };
 }
 
@@ -214,6 +215,12 @@ export function mergeParamDefaults(cfg: GenerationConfig): GenerationConfig {
   const out = { ...base, ...cfg, params: merged };
   // 老版本存下来的配置不会有 Agent 相关字段，补齐，别让 undefined 漏下去
   if (!Array.isArray(out.enabledTools)) out.enabledTools = base.enabledTools;
+  if (!cfg.runtime && out.toolsEnabled) {
+    out.enabledTools = [...new Set([...out.enabledTools, 'read_tool_result', 'register_outputs'])];
+    if (out.enabledTools.some((n) => n.startsWith('chrome_'))) out.enabledTools.push('chrome_fetch_json');
+  }
+  out.runtime = { ...base.runtime!, ...cfg.runtime };
+  if (!cfg.runtime?.contextMode) out.runtime.contextMode = cfg.runtime?.contextTokens && cfg.runtime.contextTokens !== 24000 ? 'manual' : 'auto';
   if (typeof out.maxToolRounds !== 'number') out.maxToolRounds = base.maxToolRounds;
   if (typeof out.toolsEnabled !== 'boolean') out.toolsEnabled = base.toolsEnabled;
   if (out.approvalMode !== 'ask' && out.approvalMode !== 'auto' && out.approvalMode !== 'all') {

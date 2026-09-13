@@ -10,6 +10,9 @@ import type {
   GenerationConfig,
   KeyProfile,
   ModelInfo,
+  MessageQuote,
+  MessageAnnotation,
+  RunState,
   SessionGrants,
   SourceRef,
   ToolResult,
@@ -17,8 +20,11 @@ import type {
 } from './types';
 import { SEED_MODELS, buildHeaders, endpoint, fetchModels, previewBody } from './lib/api';
 import { PROBE_SPACING_MS, probe400, probeHistory, type ProbeStep } from './lib/probe400';
-import { formatExchange } from './lib/wiretap';
-import { limitKey, pacingFloor } from './lib/limits';
+import { formatExchange, failedExchange, exchangeOf, importExchanges } from './lib/wiretap';
+import { loadRuns, saveRun, recoverConversations, forgetRuns } from './lib/runs';
+import { localProgress } from './lib/task-context';
+import { capabilities, outputReserve, quotaKey, routeKey, workingBudget } from './lib/adaptive';
+import { limitKey, mergeLearnedLimit, pacingFloor, estimateRequestTokens } from './lib/limits';
 import { buildWire, runAgent, type AgentHandle } from './lib/agent';
 import {
   clearHealth,
@@ -35,6 +41,7 @@ import {
   loadSettings,
   newConversation,
   saveConversationsDebounced,
+  saveConversationsNow,
   saveSettings,
   secretGet,
   titleFrom,
@@ -55,6 +62,7 @@ import {
   type ScheduledTask,
 } from './lib/schedule';
 import AnswerBlock from './components/AnswerBlock';
+import SelectionActions from './components/SelectionActions';
 import Composer from './components/Composer';
 import ConfigPanel from './components/ConfigPanel';
 import SettingsDialog from './components/SettingsDialog';
@@ -73,6 +81,8 @@ const EXAMPLES = [
   '搜一下 2026 年 A 股量化私募的监管新规，给我一个时间线',
   '把当前 Chrome 标签页的内容总结成三点',
 ];
+
+interface QueuedInput { text: string; attachments: Attachment[]; quotes: MessageQuote[]; quoteOnly: boolean; conversationId: string | null }
 
 export default function App() {
   const [settings, setSettings] = React.useState<AppSettings | null>(null);
@@ -139,7 +149,12 @@ export default function App() {
 
   const [attachments, setAttachments] = React.useState<Attachment[]>([]);
   /** 生成期间又发的消息，按顺序排队，等这一轮结束再依次发出去 */
-  const [queue, setQueue] = React.useState<string[]>([]);
+  const [queue, setQueue] = React.useState<QueuedInput[]>([]);
+  const [quotes, setQuotes] = React.useState<MessageQuote[]>([]);
+  const [quoteOnly, setQuoteOnly] = React.useState(true);
+  const [queuePaused, setQueuePaused] = React.useState(false);
+  const startingRef = React.useRef(false);
+  const runningRef = React.useRef<{ requestId: string; convId: string; handle: AgentHandle } | null>(null);
 
   const toast = useToast();
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -155,12 +170,15 @@ export default function App() {
         loadSkills(),
         loadTasks(),
       ]);
+      let recovered = c;
+      try { recovered = recoverConversations(c, await loadRuns()); }
+      catch (err) { toast.show(`执行记录读取失败：${String(err)}`, 6000); }
       setSettings(s);
-      setConversations(c);
+      setConversations(recovered);
       setProjects(pr);
       setSkills(sk);
       setTasks(tk);
-      setActiveId(c.length ? [...c].sort((a, b) => b.updatedAt - a.updatedAt)[0].id : null);
+      setActiveId(recovered.length ? [...recovered].sort((a, b) => b.updatedAt - a.updatedAt)[0].id : null);
       setRemoteConfig(s.remote);
       // 记住过的授权在这里回填。过期的那份 loadSettings 已经丢掉了，
       // 所以这里拿到什么就是什么，不用再判一次时间
@@ -185,8 +203,8 @@ export default function App() {
   }, [settings]);
 
   React.useEffect(() => {
-    if (conversations.length) saveConversationsDebounced(conversations);
-  }, [conversations]);
+    if (settings) saveConversationsDebounced(conversations);
+  }, [conversations, !!settings]);
 
   const bootedRef = React.useRef(false);
   React.useEffect(() => {
@@ -342,6 +360,17 @@ export default function App() {
     }));
   }
 
+  async function changeAnnotation(messageId: string, noteId: string, note?: MessageAnnotation) {
+    if (!active) return;
+    const next = conversations.map((c) => c.id !== active.id ? c : { ...c, updatedAt: Date.now(),
+      messages: c.messages.map((m) => m.id !== messageId ? m : { ...m,
+        annotations: [...(m.annotations ?? []).filter((n) => n.id !== noteId), ...(note ? [note] : [])] }) });
+    setConversations(next);
+    await saveConversationsNow(next);
+  }
+
+  const saveAnnotation = (note: MessageAnnotation) => changeAnnotation(note.quote.messageId, note.id, note);
+
   function setProfileForConversation(profileId: string) {
     if (active) updateConv(active.id, (c) => ({ ...c, keyProfileId: profileId }));
     // 同时更新全局默认，新开的会话跟着走
@@ -368,6 +397,7 @@ export default function App() {
       messages: (JSON.parse(JSON.stringify(slice)) as ChatMessage[]).map((m) => ({
         ...m,
         pending: false,
+        runState: undefined,
       })),
       pinned: false,
       forkedFrom: src.id,
@@ -461,6 +491,7 @@ export default function App() {
         size: f.size ?? 0,
         text: f.text,
         dataUrl: f.dataUrl,
+        path: f.path,
       });
     }
     if (added.length) setAttachments((prev) => [...prev, ...added]);
@@ -538,7 +569,7 @@ export default function App() {
         setProbe({ done: p.done, total: p.total, current: p.current }),
       shouldStop: () => probeStopRef.current,
       // 体检跟对话共用同一份「这条路由的脾气」：读同一份记录，也往回写
-      limitOf: (m) => settingsRef.current?.modelLimits?.[limitKey(profile.id, m)],
+      limitOf: (m) => settingsRef.current?.modelLimits?.[limitKey(profile.id, m, profile.baseUrl)],
       onLearnLimit: (m, l) =>
         setSettings((prev) =>
           prev
@@ -546,7 +577,7 @@ export default function App() {
                 ...prev,
                 modelLimits: {
                   ...(prev.modelLimits ?? {}),
-                  [limitKey(profile.id, m)]: { ...(prev.modelLimits?.[limitKey(profile.id, m)] ?? {}), ...l },
+                  [limitKey(profile.id, m, profile.baseUrl)]: mergeLearnedLimit(prev.modelLimits?.[limitKey(profile.id, m, profile.baseUrl)],l),
                 },
               }
             : prev,
@@ -698,115 +729,49 @@ export default function App() {
    * 注意别跟上面那个 runProbe 搞混：那个是「批量体检模型列表」，
    * 这个是「拆解一次失败的请求」。两件事，两个名字。
    */
-  const runRequestProbe = React.useCallback(async () => {
+  const runRequestProbe = React.useCallback(async (message?: ChatMessage) => {
     const cfg = active?.config ?? settings?.defaultConfig;
     if (!cfg || !profile || !settings) return;
-    const apiKey = (await secretGet(profile.id)) ?? '';
-    if (!apiKey) {
-      toast.show('这份凭据还没填密钥');
-      return;
+    const runId = message?.runState?.runId;
+    const bridge = desktop();
+    if (bridge?.exchanges) importExchanges(await bridge.exchanges(runId));
+    const captured = exchangeOf(message?.runState?.failedRequestId) ?? failedExchange(runId);
+    if (!captured) { setPreview('没有找到对应的失败请求，无法根据普通聊天记录替它下结论。'); return; }
+    setPreview(formatExchange(captured));
+    const apiKey = await secretGet(profile.id);
+    if (!apiKey) return;
+    const original = captured.request as Record<string, unknown>;
+    const tokens = estimateRequestTokens(original);
+    const limit = settings.modelLimits?.[limitKey(profile.id, String(original.model), profile.baseUrl)];
+    const cap = capabilities(profile,cfg,limit,models.find(m => m.id === cfg.model));
+    const tpm = cap.tpm;
+    const output = outputReserve(original,cfg,cap);
+    if ((tpm && tokens+output > tpm) || tokens > workingBudget(cfg,cap,output)) {
+      setPreview(formatExchange(captured)+'\n\n本地检查：原请求超出当前发送预算，已保留原文，不再重复发送大请求。'); return;
     }
-    const usable = new Set(availableTools(canRunHostTools).map((t) => t.name));
-    const names = cfg.toolsEnabled
-      ? cfg.enabledTools.filter((n) => usable.has(n) && TOOL_BY_NAME[n])
-      : [];
-
-    const render = (steps: ProbeStep[], head: string, note?: string) =>
-      setPreview(
-        [
-          head,
-          note ?? '',
-          '',
-          ...steps.map((st) => `${st.ok ? '✓' : '✗'} ${st.label}${st.error ? `\n     ${st.error}` : ''}`),
-        ]
-          .filter((x, i) => x !== '' || i > 1)
-          .join('\n'),
-      );
-    render(
-      [],
-      `正在排查…每 ${PROBE_SPACING_MS / 1000} 秒才发一次（一条 hi、最多 1 个 token）。\n` +
-        '刻意放这么慢，是为了保证这串请求本身不可能触发限流 —— ' +
-        '这样万一真收到限流，那就是结论，而不是排查自己造出来的假象。',
-    );
-
-    const send = (body: Record<string, unknown>) =>
-      new Promise<{ ok: boolean; error?: string; status?: number }>((resolve) => {
-        let failed: string | undefined;
-        let failedStatus: number | undefined;
-        void getTransport()
-          .chat(
-            {
-              requestId: uid('probe'),
-              url: endpoint(profile.baseUrl, 'chat/completions'),
-              headers: buildHeaders(apiKey, profile),
-              body,
-              stream: false,
-              timeoutMs: 30000,
-              // 排查走同一条节奏链（跟正常对话抢的是同一份配额），
-              // 并且把自己压到比平时慢得多的节奏上。这是整个设计的支点：
-              // 只有当这串请求**在设计上就不可能**打爆配额时，
-              // 它返回的限流才是证据，而不是它自己造出来的假象。
-              paceKey: profile.id,
-              // 排查有自己的下限（保证它不可能触发限流），但如果这条路由
-              // 之前撞出来的节奏更慢，就听更慢的那个 —— 学到的东西不该被
-              // 一个常数盖掉
-              paceMinMs: Math.max(
-                PROBE_SPACING_MS,
-                pacingFloor(settingsRef.current?.modelLimits?.[limitKey(profile.id, cfg.model)], 32),
-              ),
-            },
-            {
-              onContent() {},
-              onReasoning() {},
-              onToolCalls() {},
-              onUsage() {},
-              onDone() {
-                resolve({ ok: !failed, error: failed, status: failedStatus });
-              },
-              onError(msg, status) {
-                failed = msg;
-                failedStatus = status;
-              },
-            },
-          )
-          .then(() => resolve({ ok: !failed, error: failed, status: failedStatus }))
-          .catch((e: unknown) => resolve({ ok: false, error: String(e) }));
+    const attempts: string[] = [];
+    // Compare an explicit baseline with the exact original body, not reconstructed chat history.
+    for (const [label, body] of [
+      ['最小基线', { model: original.model, messages: [{ role: 'user', content: 'Reply OK' }], stream: false, max_tokens: 1 }],
+      ['原始失败请求', original],
+    ] as const) {
+      let failure = '';
+      const id = uid('probe');
+      await getTransport().chat({ requestId: id, purpose: 'probe', runId, url: captured.url,
+        headers: buildHeaders(apiKey, profile), body, stream: body.stream === true, timeoutMs: 30000,
+        paceKey: quotaKey(profile), paceTokens: estimateRequestTokens(body)+outputReserve(body,cfg,cap), paceTpm: tpm,
+        paceInput:estimateRequestTokens(body), paceOutput:outputReserve(body,cfg,cap), paceItpm:cap.itpm, paceOtpm:cap.otpm,
+        paceMinMs: Math.max(PROBE_SPACING_MS, cfg.runtime?.rpm ? 60000/cfg.runtime.rpm : 0),
+      }, { onContent() {}, onReasoning() {}, onToolCalls() {}, onUsage() {}, onDone() {},
+        onError(text, status) { failure = `${status ?? ''} ${text}`; },
+        onPaceWait(ms) { setPreview(formatExchange(captured)+`\n\n${label}正在排队，约 ${Math.ceil(ms/1000)} 秒后发送。`); },
       });
-
-    try {
-      const rep = await probe400(cfg, names, settings.effortMappings, send, (steps, note) =>
-        render(steps, '正在排查…', note),
-      );
-
-      /*
-       * 字段全绿但真实对话仍然失败时，锅在历史消息里 —— 接着二分它。
-       * 上一版到这里就只能耸耸肩说「可能是历史里有什么」，那不叫结论。
-       */
-      let historyPart = '';
-      const wire = active ? buildWire(active.messages, cfg) : [];
-      if (!rep.badTools && wire.length > 2) {
-        render(rep.steps, '字段都没问题，接着查历史消息…');
-        const h = await probeHistory(cfg.model, wire, send);
-        historyPart = ['', '—— 历史消息 ——', h.verdict, ...h.steps.map((st) => `${st.ok ? '✓' : '✗'} ${st.label}`)].join(
-          '\n',
-        );
-      }
-
-      setPreview(
-        [
-          '排查结论',
-          '',
-          rep.verdict,
-          '',
-          '—— 每一步 ——',
-          ...rep.steps.map((st) => `${st.ok ? '✓' : '✗'} ${st.label}${st.error ? `\n     ${st.error}` : ''}`),
-          historyPart,
-        ].join('\n'),
-      );
-    } catch (e) {
-      setPreview(`排查本身出错了：${e instanceof Error ? e.message : String(e)}`);
+      attempts.push(`${label}：${failure || '请求成功'}`);
+      if (failure && /429|tpm|rpm|限流|401|403/i.test(failure)) break;
     }
-  }, [active, settings, profile, canRunHostTools, toast]);
+    setPreview(formatExchange(captured)+'\n\n—— 对照结果 ——\n'+attempts.join('\n')+
+      '\n单次成功不证明故障不存在；以上只说明本次对照结果，原失败证据仍保留。');
+  }, [active, settings, profile]);
 
   const revokeGrants = React.useCallback(() => {
     setGrants({ extraRoots: [], admin: false, screen: false });
@@ -837,26 +802,21 @@ export default function App() {
   );
 
   const send = React.useCallback(
-    async (text: string, replaceFromIndex?: number) => {
+    async (text: string, replaceFromIndex?: number, resumeFrom?: RunState, queuedInput?: QueuedInput, resolution?: 'skip' | 'retry') => {
       if (!settings) return;
-      if (busy) {
-        // 正在生成时不打断，排到队尾；附件跟着这条一起排
-        setQueue((q) => [...q, text]);
+      if (startingRef.current || busy || runningRef.current) {
+        setQueue((q) => [...q, queuedInput ?? { text, attachments: [...attachments], quotes: [...quotes], quoteOnly, conversationId: active?.id ?? null }]);
+        setAttachments([]); setQuotes([]);
         return;
       }
-
       if (!profile) {
-        toast.show('先去设置里登记一份 API 凭据');
-        setSettingsOpen(true);
-        return;
+        toast.show('先去设置里登记一份 API 凭据'); setSettingsOpen(true); return;
       }
-      const apiKey = await secretGet(profile.id);
-      if (!apiKey) {
-        toast.show('这份凭据还没填 API Key');
-        setSettingsOpen(true);
-        return;
-      }
-
+      startingRef.current = true;
+      let apiKey: string | null;
+      try { apiKey = await secretGet(profile.id); }
+      catch (e) { startingRef.current = false; toast.show(String(e)); return; }
+      if (!apiKey) { startingRef.current = false; toast.show('这份凭据还没填 API Key'); setSettingsOpen(true); return; }
       // 没有会话就现开一个
       let conv = active;
       let baseList = conversations;
@@ -867,13 +827,22 @@ export default function App() {
       const cfg = conv.config;
 
       if (!cfg.model) {
+        startingRef.current = false;
         toast.show('先选一个模型');
         setConfigOpen(true);
         return;
       }
 
-      const kept =
-        replaceFromIndex === undefined ? conv.messages : conv.messages.slice(0, replaceFromIndex);
+      const resumeIndex = resumeFrom ? conv.messages.findIndex((m) => m.runState === resumeFrom ||
+        (resumeFrom.runId && m.runState?.runId === resumeFrom.runId)) : -1;
+      const resumeAnswer = resumeIndex >= 0 ? conv.messages[resumeIndex] : undefined;
+      const previousQuestion = resumeIndex > 0 ? conv.messages[resumeIndex-1] : undefined;
+      const kept = resumeFrom ? conv.messages.slice(0, Math.max(0, resumeIndex-1))
+        : replaceFromIndex === undefined ? conv.messages : conv.messages.slice(0, replaceFromIndex);
+      if (!resumeFrom && replaceFromIndex !== undefined) {
+        try { await forgetRuns(conv.id, new Set(conv.messages.slice(replaceFromIndex).map((m) => m.id))); }
+        catch (e) { startingRef.current = false; toast.show(`无法更新执行记录：${String(e)}`); return; }
+      }
 
       // 本轮唤起的技能：固定一份快照，并记一次使用次数。
       // 注意技能是**粘的** —— 发完不清空，一直注入到用户自己点掉那个 ✕。
@@ -885,24 +854,27 @@ export default function App() {
         setSkills((prev) => prev.map((x) => (ids.has(x.id) ? { ...x, uses: x.uses + 1 } : x)));
       }
 
-      const userMsg: ChatMessage = {
+      const userMsg: ChatMessage = previousQuestion ?? {
         id: uid('m'),
         role: 'user',
         content: text,
         createdAt: Date.now(),
-        attachments: attachments.length ? attachments : undefined,
+        attachments: (queuedInput?.attachments ?? attachments).length ? (queuedInput?.attachments ?? attachments) : undefined,
+        quotes: queuedInput?.quotes ?? quotes,
+        quoteOnly: (queuedInput?.quotes ?? quotes).length > 0 ? (queuedInput?.quoteOnly ?? quoteOnly) : false,
         skillNames: turnSkills.length ? turnSkills.map((x) => x.name) : undefined,
       };
       const answerMsg: ChatMessage = {
-        id: uid('m'),
+        ...resumeAnswer,
+        id: resumeAnswer?.id ?? uid('m'),
         role: 'assistant',
-        content: '',
-        reasoning: '',
-        createdAt: Date.now(),
-        pending: true,
+        content: resumeFrom?.content ?? resumeAnswer?.content ?? '',
+        reasoning: resumeFrom?.reasoning ?? resumeAnswer?.reasoning ?? '',
+        createdAt: resumeAnswer?.createdAt ?? Date.now(),
+        pending: true, error: undefined, errorInfo: undefined, progress: undefined,
         model: cfg.model,
-        steps: [],
-        sources: [],
+        steps: resumeFrom?.steps ?? resumeAnswer?.steps ?? [],
+        sources: resumeFrom?.sources ?? [],
       };
 
       const convId = conv.id;
@@ -910,16 +882,17 @@ export default function App() {
       const nextConv: Conversation = {
         ...conv,
         title: kept.length === 0 ? titleFrom(text) : conv.title,
-        messages: [...history, answerMsg],
+        messages: resumeAnswer ? conv.messages.map((m) => m.id === answerMsg.id ? answerMsg : m) : [...history, answerMsg],
         updatedAt: Date.now(),
       };
 
       setConversations(baseList.map((c) => (c.id === convId ? nextConv : c)));
       setActiveId(convId);
-      setAttachments([]);
+      if (!resumeFrom) { setAttachments([]); setQuotes([]); }
+      setQueuePaused(false);
 
       /* --- 流式缓冲：按 60ms 节流刷进 state，不然一个 token 一次 setState --- */
-      const buf = { content: '', reasoning: '', dirty: false };
+      const buf = { content: answerMsg.content, reasoning: answerMsg.reasoning ?? '', dirty: false };
       const flush = () => {
         if (!buf.dirty) return;
         buf.dirty = false;
@@ -929,10 +902,16 @@ export default function App() {
       };
       const timer = setInterval(flush, 60);
 
-      const steps: ToolStep[] = [];
+      const steps: ToolStep[] = [...(answerMsg.steps ?? [])];
+      let latestState: RunState | null = resumeFrom ?? null;
       const started = Date.now();
       const requestId = uid('r');
 
+      const finishUi = () => {
+        clearInterval(timer); flush();
+        if (runningRef.current?.requestId === requestId) { runningRef.current = null; setBusy(null); }
+        startingRef.current = false;
+      };
       const handle = runAgent({
         requestId,
         profile,
@@ -944,8 +923,11 @@ export default function App() {
         // 传函数而不是快照：中途拿到的授权要对后面的工具调用立刻生效
         toolCtx: () => toolContextOf(settings, conv.projectId ?? null, grantsRef.current),
         effortMappings: settings.effortMappings,
+        resume: resumeFrom,
+        resolveUncertain: resolution,
         // 这条路由的窗口有多大 —— 之前撞出来的那个数
-        limitOf: () => settingsRef.current?.modelLimits?.[limitKey(profile.id, cfg.model)],
+        modelInfo: [...(settings.cachedModels[profile.id] ?? []), ...(settings.customModels[profile.id] ?? [])].find(m => m.id === cfg.model),
+        limitOf: () => settingsRef.current?.modelLimits?.[limitKey(profile.id, cfg.model, profile.baseUrl)],
         onLearnLimit: (l) =>
           setSettings((prev) =>
             prev
@@ -953,10 +935,7 @@ export default function App() {
                   ...prev,
                   modelLimits: {
                     ...(prev.modelLimits ?? {}),
-                    [limitKey(profile.id, cfg.model)]: {
-                      ...(prev.modelLimits?.[limitKey(profile.id, cfg.model)] ?? {}),
-                      ...l,
-                    },
+                    [limitKey(profile.id, cfg.model, profile.baseUrl)]: mergeLearnedLimit(prev.modelLimits?.[limitKey(profile.id, cfg.model, profile.baseUrl)],l),
                   },
                 }
               : prev,
@@ -992,6 +971,9 @@ export default function App() {
           return new Promise<boolean>((resolve) => setConfirmReq({ step, resolve }));
         },
         events: {
+          onContentReplace(content, reasoning) {
+            buf.content = content; buf.reasoning = reasoning; buf.dirty = true; flush();
+          },
           onContentDelta(d) {
             buf.content += d;
             buf.dirty = true;
@@ -1004,7 +986,7 @@ export default function App() {
             const i = steps.findIndex((s) => s.id === step.id);
             if (i === -1) steps.push(step);
             else steps[i] = step;
-            patchMessage(convId, answerMsg.id, { steps: [...steps] });
+            patchMessage(convId, answerMsg.id, { steps: [...steps], artifacts: collectArtifacts(buf.content, steps) });
           },
           onSources(list: SourceRef[]) {
             patchMessage(convId, answerMsg.id, { sources: [...list] });
@@ -1019,20 +1001,36 @@ export default function App() {
           onStopReason(reason) {
             patchMessage(convId, answerMsg.id, { stopReason: reason ?? undefined });
           },
+          async onRunState(state) {
+            if (state) {
+              latestState = state;
+              await saveRun({ id: state.runId ?? requestId, conversationId: convId, answerId: answerMsg.id,
+                question: userMsg, config: cfg, keyProfileId: profile.id, projectId: conv!.projectId,
+                title: nextConv.title, state });
+            }
+            patchMessage(convId, answerMsg.id, { runState: state ?? undefined,
+              ...(state ? { milestones: state.milestones, contextSnapshot: state.contextSnapshot } : {}) });
+          },
+          onPaused(reason) {
+            finishUi(); setQueuePaused(true);
+            patchMessage(convId, answerMsg.id, { pending: false, notice: undefined,
+              content: buf.content, reasoning: buf.reasoning, progress: localProgress(steps, reason),
+              artifacts: collectArtifacts(buf.content, steps), elapsedMs: Date.now()-started });
+          },
           onDone() {
-            clearInterval(timer);
-            flush();
+            finishUi();
             const arts = collectArtifacts(buf.content, steps);
             patchMessage(convId, answerMsg.id, {
               pending: false,
               notice: undefined,
+              progress: undefined,
               content: buf.content,
               reasoning: buf.reasoning,
               elapsedMs: Date.now() - started,
               artifacts: arts.length ? arts : undefined,
             });
-            // 这条路由是活的 —— 把之前攒下的失败记录清零
-            setSettings((prev) =>
+            // 只有完整响应成功才清除失败记录。
+            if (latestState?.status === 'completed') setSettings((prev) =>
               prev
                 ? {
                     ...prev,
@@ -1042,16 +1040,16 @@ export default function App() {
             );
             // 只产出一个东西时直接开右侧面板 —— 多个就让用户自己挑
             if (arts.length === 1) setOpenArtifact(arts[0]);
-            setBusy(null);
           },
           onError(msg, info) {
-            clearInterval(timer);
-            flush();
+            finishUi(); setQueuePaused(true);
             patchMessage(convId, answerMsg.id, {
               pending: false,
               notice: undefined,
               error: msg,
               errorInfo: info,
+              progress: localProgress(steps, msg),
+              artifacts: collectArtifacts(buf.content, steps),
               content: buf.content,
               elapsedMs: Date.now() - started,
             });
@@ -1067,29 +1065,42 @@ export default function App() {
                   : prev,
               );
             }
-            setBusy(null);
           },
         },
       });
 
+      startingRef.current = false;
+      runningRef.current = { requestId, convId, handle };
       setBusy({ requestId, handle });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [settings, conversations, active, profile, busy, canRunHostTools, attachments, activeSkills, projects],
+    [settings, conversations, active, profile, busy, canRunHostTools, attachments, activeSkills, projects, quotes, quoteOnly],
   );
 
   function stop() {
-    busy?.handle.abort();
-    setBusy(null);
+    setQueuePaused(true);
+    runningRef.current?.handle.abort();
+    setConfirmReq((request) => { request?.resolve(false); return null; });
+    setGrantReq((request) => { request?.resolve(false); return null; });
   }
+
+  const resumeRun = React.useCallback(
+    (msg: ChatMessage, resolution?: 'skip' | 'retry') => {
+      if (busy || !msg.runState || !active) return;
+      const index = active.messages.findIndex((m) => m.id === msg.id);
+      const question = active.messages[index-1]?.content ?? '继续';
+      void send(question, undefined, msg.runState, undefined, resolution);
+    }, [busy, active, send],
+  );
 
   // 上一轮结束后自动发下一条排队的
   React.useEffect(() => {
-    if (busy || queue.length === 0) return;
+    if (busy || runningRef.current || queuePaused || queue.length === 0) return;
     const [next, ...rest] = queue;
+    if (next.conversationId && next.conversationId !== activeId) { setActiveId(next.conversationId); return; }
     setQueue(rest);
-    void send(next);
-  }, [busy, queue, send]);
+    void send(next.text, undefined, undefined, next);
+  }, [busy, queue, send, queuePaused, activeId]);
 
   /* ---------------- 定时任务调度 ---------------- */
 
@@ -1244,6 +1255,10 @@ export default function App() {
 
   const composer = (
     <Composer
+      contextPreview={profile ? { profile,config,history:(active?.messages ?? []).filter(m => !m.pending),
+        extraSystem:[projectSystemBlock(activeProject),skillSystemBlock(activeSkills)].filter(Boolean).join('\n\n'),
+        toolNames,mappings:settings.effortMappings,learned:settings.modelLimits?.[limitKey(profile.id,config.model,profile.baseUrl)],
+        modelInfo:models.find(m => m.id === config.model), current:busy ? [...(active?.messages ?? [])].reverse().find(m => m.pending)?.contextSnapshot : undefined } : undefined}
       busy={Boolean(busy)}
       disabled={false}
       sendKey={settings.sendKey}
@@ -1251,6 +1266,10 @@ export default function App() {
       onStop={stop}
       stream={config.stream}
       toolCount={toolNames.length}
+      quotes={quotes}
+      quoteOnly={quoteOnly}
+      onQuoteOnly={setQuoteOnly}
+      onRemoveQuote={(id) => setQuotes((q) => q.filter((x) => x.id !== id))}
       attachments={attachments}
       onAddAttachments={(m) => void addAttachments(m)}
       onPasteImage={addPastedImage}
@@ -1283,6 +1302,8 @@ export default function App() {
       effortMappings={settings.effortMappings}
       effortManual={config.thinkingStyle !== 'auto'}
       onOpenMappings={() => {
+        const route = profile?.routeProfiles?.[routeKey(profile,config.model)];
+        if (route?.effortStyle && route.effortStyle !== 'mapping') { setConfigOpen(true); return; }
         setSettingsOpen(true);
         setSettingsTab('effort');
       }}
@@ -1293,7 +1314,9 @@ export default function App() {
       }
       onDropSkill={(id) => setActiveSkills((prev) => prev.filter((x) => x.id !== id))}
       projectPrompts={activeProject?.prompts ?? []}
-      queued={queue}
+      queued={queue.map((q) => q.text || `${q.attachments.length} 个附件`)}
+      queuePaused={queuePaused}
+      onResumeQueue={() => setQueuePaused(false)}
       onDropQueued={(i) => setQueue((q) => q.filter((_, j) => j !== i))}
     />
   );
@@ -1316,6 +1339,8 @@ export default function App() {
           }}
           onNew={() => newChat(null)}
           onDelete={(id) => {
+            if (runningRef.current?.convId === id) stop();
+            void forgetRuns(id);
             setConversations((prev) => prev.filter((c) => c.id !== id));
             if (activeId === id) setActiveId(null);
           }}
@@ -1426,6 +1451,10 @@ export default function App() {
                     answer={t.a}
                     showReasoning={settings.showReasoningByDefault}
                     onOpenArtifact={setOpenArtifact}
+                    onArtifactSaved={(artifact) => {
+                      if (active && t.a) updateConv(active.id, (c) => ({ ...c, messages: c.messages.map((m) => m.id === t.a!.id
+                        ? { ...m, artifacts: [...(m.artifacts ?? []).filter((a) => a.path !== artifact.path), artifact] } : m) }));
+                    }}
                     onCopy={(text) => {
                       void navigator.clipboard.writeText(text);
                       toast.show('已复制');
@@ -1435,7 +1464,11 @@ export default function App() {
                         ? undefined
                         : () => void send(t.q!.content, t.qIndex)
                     }
-                    onProbe={busy ? undefined : () => void runRequestProbe()}
+                    onProbe={busy ? undefined : () => void runRequestProbe(t.a ?? undefined)}
+                    onResume={busy || !t.a?.runState ? undefined : () => resumeRun(t.a!)}
+                    onResolveUncertain={busy || !t.a?.runState ? undefined : (choice) => resumeRun(t.a!, choice)}
+                    onSaveAnnotation={saveAnnotation}
+                    onDeleteAnnotation={(messageId, noteId) => changeAnnotation(messageId, noteId)}
                     onEditQuestion={
                       busy || !t.q ? undefined : (text) => void send(text, t.qIndex)
                     }
@@ -1448,6 +1481,7 @@ export default function App() {
                             const drop = new Set<string>();
                             if (t.q) drop.add(t.q.id);
                             if (t.a) drop.add(t.a.id);
+                            void forgetRuns(active.id, drop);
                             updateConv(active.id, (c) => ({
                               ...c,
                               messages: c.messages.filter((m) => !drop.has(m.id)),
@@ -1485,6 +1519,8 @@ export default function App() {
       {configOpen ? (
       <aside className="config-panel open">
         <ConfigPanel
+          profile={profile}
+          onProfileChange={next => setSettings(prev => prev ? { ...prev,keyProfiles:prev.keyProfiles.map(p => p.id === next.id ? next : p) } : prev)}
           config={config}
           onChange={setConfig}
           models={models}
@@ -1510,7 +1546,12 @@ export default function App() {
               ),
             )
           }
-          onRawDump={() => setPreview(formatExchange())}
+          onRawDump={() => { void (async () => {
+            const runId = [...(active?.messages ?? [])].reverse().find((m) => m.runState)?.runState?.runId;
+            const bridge = desktop();
+            if (bridge?.exchanges) importExchanges(await bridge.exchanges(runId));
+            setPreview(formatExchange(failedExchange(runId)));
+          })(); }}
           onSaveAsDefault={() => {
             setSettings((s) => (s ? { ...s, defaultConfig: config } : s));
             toast.show('已存为新会话的默认配置');
@@ -1605,6 +1646,9 @@ export default function App() {
         />
       ) : null}
 
+      {active ? <SelectionActions key={active.id} messages={active.messages}
+        onReply={(quote) => { setQuotes((q) => [...q, quote]); setQuoteOnly(true); }}
+        onAnnotate={saveAnnotation} /> : null}
       <Toast message={toast.message} />
     </div>
   );

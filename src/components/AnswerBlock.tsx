@@ -1,9 +1,12 @@
 import React from 'react';
-import type { Artifact, ChatMessage, ErrorInfo, SourceRef, ToolStep } from '../types';
+import type { Artifact, ChatMessage, ErrorInfo, MessageAnnotation, SourceRef, ToolStep } from '../types';
+import { typeOfPath } from '../lib/artifacts';
 import { ArtifactStrip } from './ArtifactPanel';
 import { TOOL_BY_NAME } from '../lib/tools/registry';
 import { isCleanStop } from '../lib/errors';
 import Markdown from './Markdown';
+import MessageNotes from './MessageNotes';
+import MilestonePanel from './MilestonePanel';
 
 /** finish_reason 的人话注解，鼠标悬停时显示 */
 const STOP_HINT: Record<string, string> = {
@@ -206,10 +209,16 @@ export default function AnswerBlock(props: {
   answer: ChatMessage | null;
   showReasoning: boolean;
   onOpenArtifact?: (a: Artifact) => void;
+  onArtifactSaved?: (a: Artifact) => void;
   onCopy: (text: string) => void;
   onRetry?: () => void;
   /** 400 时的「自动排查」—— 只有确实是请求体被拒时才传 */
   onProbe?: () => void;
+  /** 有中断现场时的「接着跑」 */
+  onResume?: () => void;
+  onResolveUncertain?: (choice: 'skip' | 'retry') => void;
+  onSaveAnnotation: (note: MessageAnnotation) => Promise<void>;
+  onDeleteAnnotation: (messageId: string, noteId: string) => Promise<void>;
   onEditQuestion?: (text: string) => void;
   onFork?: () => void;
   onDelete?: () => void;
@@ -225,9 +234,27 @@ export default function AnswerBlock(props: {
   const sources = answer?.sources ?? [];
   const steps = answer?.steps ?? [];
   const live = Boolean(answer?.pending);
+  const inputFiles: Artifact[] = (question?.attachments ?? []).filter((a) => a.path).map((a) => ({
+    id: `input-${a.id}`, kind: 'file', name: a.name, path: a.path, type: typeOfPath(a.path!),
+    size: a.size, direction: 'input', verifiedAt: question!.createdAt, createdAt: question!.createdAt,
+  }));
+  const files = [...inputFiles, ...(answer?.artifacts ?? [])].filter((a, i, all) =>
+    all.findIndex((b) => b.path && a.path ? b.path === a.path && b.direction === a.direction : b.id === a.id) === i);
 
   return (
     <article className="turn">
+      {question?.quotes?.length ? (
+        <div className="quoted-context">
+          {question.quotes.map((q) => (
+            <blockquote key={q.id}>
+              <button className="quote-source" onClick={() => {
+                document.getElementById(`msg-${q.messageId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }}>引用{q.role === 'assistant' ? '助手' : '用户'}的原文 ↗</button>
+              <div>{q.text}</div>
+            </blockquote>
+          ))}
+        </div>
+      ) : null}
       {question ? (
         editing ? (
           <div className="q-edit">
@@ -253,7 +280,7 @@ export default function AnswerBlock(props: {
             </div>
           </div>
         ) : (
-          <h2 className="question">
+          <h2 className="question" id={`msg-${question.id}`} data-message-id={question.id}>
             {question.skillNames?.length ? (
               <span className="q-attach">
                 {question.skillNames.map((n) => (
@@ -287,6 +314,9 @@ export default function AnswerBlock(props: {
         )
       ) : null}
 
+      {question ? <MessageNotes notes={question.annotations} onSave={props.onSaveAnnotation}
+        onDelete={(id) => props.onDeleteAnnotation(question.id, id)} /> : null}
+
       {sources.length ? <SourcesRow sources={sources} /> : null}
       {steps.length ? <StepTrace steps={steps} live={live} /> : null}
 
@@ -302,6 +332,31 @@ export default function AnswerBlock(props: {
 
       {answer?.notice ? <div className="answer-notice">{answer.notice}</div> : null}
 
+      {/*
+        断线保护的入口。放在错误卡**上面**：先告诉人「东西还在」，
+        再让他看出了什么事 —— 顺序反过来的话，人已经准备重问了
+      */}
+      {answer?.runState && !answer.pending && props.onResume ? (
+        <div className="resume-bar">
+          <span className="resume-icon">⏸</span>
+          <span>
+            这一轮停在第 {answer.runState.round} 轮
+            {answer.runState.stoppedBy === 'user' ? '（你按了停止）' : ''}，
+            已经查到的 {answer.runState.working.filter((m) => m.role === 'tool').length} 步结果都还在
+          </span>
+          <span style={{ flex: 1 }} />
+          {answer.runState.uncertainCallId && props.onResolveUncertain ? (
+            <div className="resume-actions">
+              <button className="btn sm" onClick={() => props.onResolveUncertain?.('skip')}>已核实，跳过此步</button>
+              <button className="btn sm" onClick={() => props.onResolveUncertain?.('retry')}>允许重试此步</button>
+            </div>
+          ) : <button className="btn sm primary" onClick={props.onResume}>接着跑</button>}
+        </div>
+      ) : null}
+
+      <MilestonePanel items={answer?.milestones ?? answer?.runState?.milestones} steps={answer?.steps ?? answer?.runState?.steps} />
+      {answer?.progress ? <div className="saved-progress"><strong>已保存的进度</strong><div>{answer.progress}</div></div> : null}
+
       {answer?.error ? (
         <ErrorCard
           raw={answer.error}
@@ -311,8 +366,8 @@ export default function AnswerBlock(props: {
         />
       ) : null}
 
-      {answer && !answer.error ? (
-        <div className="answer">
+      {answer ? (
+        <div className="answer" id={`msg-${answer.id}`} data-message-id={answer.id}>
           {answer.content ? (
             <Markdown text={answer.content} sources={sources} />
           ) : live && !steps.length ? (
@@ -326,9 +381,12 @@ export default function AnswerBlock(props: {
         </div>
       ) : null}
 
-      {answer?.artifacts?.length && props.onOpenArtifact ? (
-        <ArtifactStrip artifacts={answer.artifacts} onOpen={props.onOpenArtifact} />
+      {files.length && props.onOpenArtifact ? (
+        <ArtifactStrip artifacts={files} onOpen={props.onOpenArtifact} onSaved={props.onArtifactSaved} />
       ) : null}
+
+      {answer ? <MessageNotes notes={answer.annotations} onSave={props.onSaveAnnotation}
+        onDelete={(id) => props.onDeleteAnnotation(answer.id, id)} /> : null}
 
       {answer && !answer.pending ? (
         <div className="answer-foot">

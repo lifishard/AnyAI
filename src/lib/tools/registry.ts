@@ -51,6 +51,40 @@ const clip = (v: unknown, n = 48): string => {
 };
 
 export const TOOLS: ToolDef[] = [
+  {
+    name: 'update_plan', label: '更新里程碑', group: 'agent',
+    description: '为复杂任务创建或更新里程碑（按 id 合并，未提交项保留）。完成项的 evidence 必须是成功工具的 callId，或 text: 后附已经写出的答案原文。文件存在不代表任务覆盖完整，请按 acceptance 核验后完成。',
+    parameters: { type: 'object', properties: { milestones: { type: 'array', items: { type: 'object', properties: {
+      id: { type: 'string' }, title: { type: 'string' }, status: { type: 'string', enum: ['pending','in_progress','completed','blocked'] },
+      acceptance: { type: 'string' }, evidence: { type: 'array', items: { type: 'string' } }, note: { type: 'string' },
+    }, required: ['id','title','status'] } } }, required: ['milestones'] }, summarize: () => '更新任务里程碑',
+  },
+  {
+    name: 'read_context', label: '查阅历史原文', group: 'agent',
+    description: '分页查阅本任务原始记录（摘要之外的原文）。省略 id 可搜索/列出消息索引；提供 id 读取内容和文本附件。query 过滤正文，offset 为字符偏移，limit 最多 12000。可另传 image_index（从 0 开始）取回该消息的原始图片。',
+    parameters: { type: 'object', properties: { id: { type: 'string' }, query: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' }, image_index: { type: 'integer' } } },
+    summarize: () => '查阅保存的原文',
+  },
+  {
+    name: 'chrome_fetch_json', label: '读取已登录 API', group: 'chrome', needsHost: true,
+    description: '通过已登录的 Chrome 标签页读取同源 JSON API（GET）。自动检查状态和数组结构；用 fields 选择必要字段、limit 控制返回条数。优先处理 nextOffset，再跟随 nextPage，直到所需范围完整。适合读取 Canvas 课程、作业、事件，避免编写重复 fetch/map 脚本。',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, path: { type: 'string' },
+      fields: { type: 'array', items: { type: 'string' } }, items_path: { type: 'string' },
+      offset: { type: 'integer' }, limit: { type: 'integer', maximum: 100 } }, required: ['path'] },
+    summarize: (a) => `读取 API ${clip(a.path)}`,
+  },
+  {
+    name: 'read_tool_result', label: '读取已存结果', group: 'agent', needsHost: true,
+    description: '分页读取之前保存的完整工具结果。使用结果里的 id，不要重复发起原查询。offset 是字符偏移，最多返回 16000 字符。',
+    parameters: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }, required: ['id'] },
+    summarize: () => '读取已保存的证据',
+  },
+  {
+    name: 'register_outputs', label: '核实交付文件', group: 'files', needsHost: true,
+    description: '核实已生成文件的真实路径并显示在对话底部。通过命令行、浏览器下载等生成文件后必须调用；支持 ICS 等任意文件。必须是已获准目录中的实际文件，不会创建不存在的文件。',
+    parameters: { type: 'object', properties: { paths: { type: 'array', items: { type: 'string' }, description: '文件绝对路径' } }, required: ['paths'] },
+    summarize: () => '核实并交付文件',
+  },
   /* ---------------- 联网 ---------------- */
   {
     name: 'web_search',
@@ -230,6 +264,7 @@ export const TOOLS: ToolDef[] = [
         command: { type: 'string', description: '完整命令行' },
         cwd: { type: 'string', description: '工作目录，默认第一个工作目录' },
         timeout_ms: { type: 'integer', description: '超时毫秒，默认 120000' },
+        output_files: { type: 'array', items: { type: 'string' }, description: '本次生成的文件绝对路径，执行后核实并展示文件卡片' },
         elevated: {
           type: 'boolean',
           description:
@@ -617,6 +652,8 @@ export const GROUP_LABEL: Record<ToolGroup, string> = {
 
 /** 新会话默认开这些：够用、且都是只读的 */
 export const DEFAULT_ENABLED_TOOLS = [
+  'read_tool_result',
+  'register_outputs',
   'web_search',
   'fetch_url',
   'project_memory_read',
@@ -627,6 +664,7 @@ export const DEFAULT_ENABLED_TOOLS = [
   'search_files',
   'chrome_tabs',
   'chrome_read_page',
+  'chrome_fetch_json',
   'github_search',
   // 默认开着，但它自己什么也做不了 —— 只能弹一个窗问用户要权限。
   // 不开的话模型撞到权限墙时只会反复报错，连「我需要 X 权限」都说不出口。

@@ -256,10 +256,40 @@ async function chromeEval(args, ctx) {
         text = String(value);
       }
     }
-    return ok(clip(text, 40000), { summary: 'Chrome 执行脚本完成' });
+    return ok(ctx.execution ? text : clip(text, 40000), { summary: 'Chrome 执行脚本完成' });
   } catch (e) {
     return fail(e);
   }
 }
 
-module.exports = { chromeTabs, chromeNavigate, chromeReadPage, chromeClick, chromeEval };
+async function chromeFetchJson(args, ctx) {
+  try {
+    const options = { path: String(args.path || ''), fields: args.fields, items_path: args.items_path,
+      offset: args.offset, limit: args.limit };
+    const project = require('./json-page.cjs').projectJson;
+    const expr = `(async () => {
+      const options = ${JSON.stringify(options)};
+      const url = new URL(options.path, location.href);
+      if (!/^https?:$/.test(url.protocol) || url.origin !== location.origin) throw new Error('只能读取当前标签页同源的已登录 API');
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20000);
+      try {
+        const response = await fetch(url.href, { credentials: 'same-origin', signal: controller.signal });
+        const text = await response.text();
+        let data;
+        try { data = JSON.parse(text); } catch { return { httpStatus: response.status, error: '返回值不是 JSON', sample: text.slice(0, 1200) }; }
+        if (!response.ok) return { httpStatus: response.status, error: JSON.stringify(data).slice(0, 2000) };
+        const result = (${project.toString()})(data, options);
+        const link = response.headers.get('link') || '';
+        const next = link.match(/<([^>]+)>;\\s*rel=["']?next["']?/i);
+        return { httpStatus: response.status, url: url.href, ...result, nextPage: next ? next[1] : null };
+      } finally { clearTimeout(timer); }
+    })()`;
+    const { value } = await evaluate(ctx, args.tab_id, expr, 25000);
+    if (value?.error) return fail(`HTTP ${value.httpStatus}：${value.error}`);
+    return ok(JSON.stringify(value), { summary: `读取已登录 API（${value?.items?.length ?? 0} 条）`,
+      sources: value?.url ? [{ title: '已登录页面的 API 数据', url: value.url }] : [] });
+  } catch (e) { return fail(e); }
+}
+
+module.exports = { chromeTabs, chromeNavigate, chromeReadPage, chromeClick, chromeEval, chromeFetchJson };

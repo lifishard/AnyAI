@@ -1,8 +1,10 @@
 import React from 'react';
-import type { GenerationConfig, ModelInfo, ReasoningEffort, ThinkingStyle } from '../types';
+import type { GenerationConfig, KeyProfile, ModelInfo, ReasoningEffort, ThinkingStyle } from '../types';
 import { PARAM_DEFS, PARAM_GROUPS } from '../lib/paramSchema';
 import { GROUP_LABEL, TOOLS, availableTools, type ToolGroup } from '../lib/tools/registry';
 import { Field, Segmented, Switch } from './ui';
+import { runtimePolicy } from '../lib/task-context';
+import RouteSettings from './RouteSettings';
 
 const THINKING_OPTIONS: { value: ThinkingStyle; label: string }[] = [
   { value: 'auto', label: '自动（按模型映射）— 推荐' },
@@ -16,6 +18,8 @@ const THINKING_OPTIONS: { value: ThinkingStyle; label: string }[] = [
 const EFFORTS: ReasoningEffort[] = ['minimal', 'low', 'medium', 'high'];
 
 export default function ConfigPanel(props: {
+  profile?: KeyProfile | null;
+  onProfileChange?: (profile: KeyProfile) => void;
   config: GenerationConfig;
   onChange: (patch: Partial<GenerationConfig>) => void;
   models: ModelInfo[];
@@ -32,6 +36,7 @@ export default function ConfigPanel(props: {
   canRunHostTools: boolean;
 }) {
   const { config: cfg, onChange } = props;
+  const runtime = runtimePolicy(cfg);
 
   const customBodyError = React.useMemo(() => {
     const s = cfg.customBody.trim();
@@ -56,6 +61,29 @@ export default function ConfigPanel(props: {
 
   return (
     <div>
+      <div className="section">
+        <div className="section-title">连续工作</div>
+        <div className="hint">任务会保存进度，在临时限流或断网后等待恢复。阶段预算用完会暂停，接着跑可开启下一阶段。</div>
+        <Field label="上下文管理">
+          <select value={runtime.contextMode ?? 'auto'} onChange={e => onChange({ runtime:{ ...runtime,contextMode:e.target.value as 'auto' | 'manual' } })}>
+            <option value="auto">自动适配当前路由</option><option value="manual">手动限制工作上下文</option>
+          </select>
+        </Field>
+        <Switch label="允许语义摘要（使用当前模型，计入阶段用量）" checked={runtime.semanticCompression !== false} onChange={v => onChange({ runtime:{ ...runtime,semanticCompression:v } })} />
+        <Switch label="允许模型按需维护里程碑" checked={runtime.milestones !== false} onChange={v => onChange({ runtime:{ ...runtime,milestones:v } })} />
+        {([
+          ['contextTokens', '本轮上下文预算（token）', '完整工具结果另存，按需读取。此处是客户端预算，不代表模型窗口大小。'],
+          ['tpm', '每分钟 token 额度（TPM）', '填上游真实额度；0 表示从响应头或报错学习，未知时使用退避。'],
+          ['rpm', '每分钟请求额度（RPM）', '同一份凭据的请求统一排队；0 表示从上游学习。'],
+          ['maxTokens', '每阶段 token 预算', '按实际用量累计，无 usage 时保守估算。0 表示不限制。'],
+          ['maxMinutes', '每阶段最长时间（分钟）', '包括执行和等待。0 表示不限制。'],
+          ['recoveryMinutes', '单次中断最多自动等待（分钟）', '达到后保留现场，等待你接着跑。'],
+        ] as const).filter(([key]) => key !== 'contextTokens' || runtime.contextMode === 'manual').map(([key, label, hint]) => <Field key={key} label={label} hint={hint}>
+          <input type="number" min={key === 'contextTokens' ? 2048 : 0} value={runtime[key]}
+            onChange={(e) => onChange({ runtime: { ...runtime, [key]: Math.max(0, Number(e.target.value) || 0) } })} />
+        </Field>)}
+      </div>
+      {props.profile && props.onProfileChange ? <RouteSettings profile={props.profile} config={cfg} onChange={props.onProfileChange} /> : null}
       {/* ---------------- 模型 ---------------- */}
       <div className="section">
         <div className="section-title">模型</div>
@@ -98,7 +126,7 @@ export default function ConfigPanel(props: {
                   ? '一次提问里模型最多能来回调几轮工具。旧的工具输出会被自动压缩，所以调高不会直接把上下文撑爆 —— ' +
                     '但每一轮都是一次真实的 API 调用：调到几百意味着一个问题可能烧掉几百次请求，跑偏了也不会自己停。' +
                     '建议配合「逐步确认」用，别跟「全部放行」叠在一起。'
-                  : '一次提问里模型最多能来回调几轮工具。到顶了会强制它用已有信息作答。旧的工具输出会被自动压缩，所以调高不会直接把上下文撑爆。'
+                  : '每阶段最多调用几轮工具。到顶后保存阶段汇总并暂停，可接着跑。较早工具输出会缩短，桌面端保留完整证据。'
               }
             >
               <div className="row" style={{ gap: 8, alignItems: 'center' }}>

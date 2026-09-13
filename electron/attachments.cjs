@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const TEXT_EXT = new Set([
-  '.txt', '.md', '.markdown', '.rst', '.log', '.csv', '.tsv', '.json', '.jsonl',
+  '.ics', '.ical', '.txt', '.md', '.markdown', '.rst', '.log', '.csv', '.tsv', '.json', '.jsonl',
   '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf', '.env',
   '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.rb', '.go', '.rs',
   '.java', '.kt', '.c', '.h', '.cpp', '.hpp', '.cs', '.swift', '.php', '.lua',

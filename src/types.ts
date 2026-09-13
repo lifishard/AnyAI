@@ -17,6 +17,80 @@ export interface KeyProfile {
   /** 附加请求头，给自建网关 / 企业代理用 */
   extraHeaders: Record<string, string>;
   createdAt: number;
+  /** Endpoint-qualified keys prevent settings following a renamed gateway accidentally. */
+  routeProfiles?: Record<string, RouteOverrides>;
+  /** Explicitly link credentials that share an upstream account/project quota. */
+  quotaGroup?: string;
+}
+
+export interface RouteOverrides {
+  contextWindow?: number;
+  maxOutput?: number;
+  rpm?: number;
+  tpm?: number;
+  itpm?: number;
+  otpm?: number;
+  outputField?: 'max_tokens' | 'max_completion_tokens' | 'none';
+  cachedInputCounts?: boolean;
+  effortStyle?: 'mapping' | 'none' | 'reasoning_effort' | 'thinking_object' | 'thinking_budget';
+  effortValues?: Partial<Record<EffortLevel, string>>;
+}
+
+export interface ContextSnapshot {
+  inputTokens: number;
+  outputReserve: number;
+  contextWindow?: number;
+  workingBudget: number;
+  source: string;
+  estimated: boolean;
+  components: { system: number; tools: number; conversation: number; attachments: number; toolResults: number };
+  compressionCount: number;
+  quota?: { rpm?: number; tpm?: number; itpm?: number; otpm?: number };
+  lastReduction?: number;
+  phase?: 'preparing' | 'compacting' | 'waiting' | 'running';
+  routeKey: string;
+  at: number;
+}
+
+export interface Milestone {
+  id: string;
+  title: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'blocked';
+  acceptance?: string;
+  evidence: string[];
+  note?: string;
+  updatedAt: number;
+}
+
+export interface ContextCompaction {
+  version: 1;
+  id: string;
+  /** Original messages before this boundary remain in working, but leave the wire view. */
+  throughId: string;
+  throughIndex: number;
+  facts: { text: string; sources: string[] }[];
+  decisions: { text: string; sources: string[] }[];
+  unresolved: { text: string; sources: string[] }[];
+  nextSteps: string[];
+  beforeTokens: number;
+  afterTokens: number;
+  createdAt: number;
+  requestId?: string;
+  strategy?: 'semantic';
+}
+
+export interface RunRequestStat {
+  route: string;
+  effort: string;
+  purpose: string;
+  estimatedInput: number;
+  actualInput?: number;
+  output?: number;
+  reservedOutput: number;
+  at: number;
+  elapsedMs?: number;
+  outcome?: 'pending' | 'accepted' | 'failed' | 'rejected' | 'cancelled';
+  detail?: string;
 }
 
 export interface ModelInfo {
@@ -25,6 +99,8 @@ export interface ModelInfo {
   ownedBy?: string;
   /** true = 用户手动添加的，不是从 /models 拉到的 */
   custom?: boolean;
+  contextWindow?: number;
+  maxOutput?: number;
 }
 
 /** 思考强度的下发风格 —— 不同厂商字段不一样，做成可切换而不是写死 */
@@ -70,6 +146,18 @@ export interface GenerationConfig {
   maxToolRounds: number;
   /** 危险工具的放行策略 */
   approvalMode: ApprovalMode;
+  /** 客户端工作预算；0 表示该项不限制。与服务端额度分别记录。 */
+  runtime?: {
+    contextTokens: number;
+    tpm: number;
+    rpm: number;
+    maxTokens: number;
+    maxMinutes: number;
+    recoveryMinutes: number;
+    contextMode?: 'auto' | 'manual';
+    semanticCompression?: boolean;
+    milestones?: boolean;
+  };
 }
 
 /**
@@ -93,6 +181,32 @@ export interface Attachment {
   text?: string;
   /** kind === 'image' 时的 data: URL */
   dataUrl?: string;
+  path?: string;
+}
+
+/** 原文快照在来源消息被编辑后仍可阅读；id 用于跳回来源。 */
+export interface MessageQuote {
+  id: string;
+  messageId: string;
+  role: Role;
+  text: string;
+}
+
+/** Personal annotation on a selected passage; not included in model requests. */
+export interface MessageAnnotation {
+  id: string;
+  quote: MessageQuote;
+  text: string;
+  createdAt: number;
+}
+
+export interface FileRecord {
+  path: string;
+  name: string;
+  size: number;
+  direction: 'input' | 'output';
+  verifiedAt: number;
+  modifiedAt?: number;
 }
 
 /** 模型要求调用的一个工具 */
@@ -124,6 +238,8 @@ export interface ToolStep {
   sources?: SourceRef[];
   /** 这一步写出/改动的文件路径 */
   filePath?: string;
+  files?: FileRecord[];
+  resultRef?: string;
 }
 
 /** 一条可点开的来源（搜索结果 / 抓取的网页 / 本地文件） */
@@ -144,6 +260,7 @@ export interface Usage {
   total_tokens?: number;
   /** 提示词里命中上下文缓存的 token 数（各家字段名不同，已归一化） */
   cached_tokens?: number;
+  reasoning_tokens?: number;
 }
 
 export interface ChatMessage {
@@ -184,6 +301,72 @@ export interface ChatMessage {
   attachments?: Attachment[];
   /** 这条用户消息唤起了哪些技能，只用于展示 */
   skillNames?: string[];
+  /**
+   * 断线保护：这一轮跑到一半的现场。
+   *
+   * agent 循环内部那个 working 数组（含全部工具往返）以前只活在内存里 ——
+   * 一旦请求失败、用户按停止、或者应用被关掉，八步的成果就随之消失，
+   * 只能从头再问一遍。存下来之后，「继续」就只是从这里接着跑。
+   *
+   * 只在**没跑完**的 assistant 消息上有值；正常收尾会清掉。
+   */
+  runState?: RunState;
+  quotes?: MessageQuote[];
+  annotations?: MessageAnnotation[];
+  quoteOnly?: boolean;
+  /** 本地生成的进度说明，不是模型生成的完成声明。 */
+  progress?: string;
+  milestones?: Milestone[];
+  contextSnapshot?: ContextSnapshot;
+}
+
+/** 中断现场。够用来无缝续跑，也够小到能塞进 localStorage */
+export interface RunState {
+  /** agent 内部的完整消息序列，含工具往返 */
+  working: ChatMessage[];
+  /** 停在第几轮 */
+  round: number;
+  /** 为什么停：出错、用户按停、应用关了 */
+  stoppedBy: 'error' | 'user' | 'unknown';
+  /** 已经攒下的来源，续跑时编号要接着排 */
+  sources?: SourceRef[];
+  at: number;
+  version?: 2;
+  runId?: string;
+  phase?: 'request' | 'tools' | 'final';
+  status?: 'running' | 'waiting' | 'paused' | 'completed';
+  pendingCalls?: ToolCall[];
+  toolCursor?: number;
+  steps?: ToolStep[];
+  content?: string;
+  reasoning?: string;
+  extraSystem?: string;
+  usage?: Usage;
+  spentTokens?: number;
+  startedAt?: number;
+  nextRetryAt?: number;
+  reason?: string;
+  errorInfo?: ErrorInfo;
+  failedRequestId?: string;
+  /** 重启后恢复待核实操作时，由用户选择核实后跳过或明确允许重试。 */
+  uncertainCallId?: string;
+  milestones?: Milestone[];
+  compactions?: ContextCompaction[];
+  contextSnapshot?: ContextSnapshot;
+  runtimeVersion?: string;
+  requestStats?: RunRequestStat[];
+}
+
+export interface RunRecord {
+  id: string;
+  conversationId: string;
+  answerId: string;
+  question: ChatMessage;
+  config: GenerationConfig;
+  keyProfileId: string;
+  projectId?: string | null;
+  title: string;
+  state: RunState;
 }
 
 export interface Conversation {
@@ -261,8 +444,8 @@ export interface AppSettings {
   /** 记住的授权，没有就是从来没记过（或者已经被撤销 / 过期清掉了） */
   rememberedGrants?: RememberedGrants;
   /**
-   * 从上游报错里学到的窗口大小，键是 `${profileId}::${model}`。
-   * 内置对照表永远会缺你正在用的那条路由，所以这里只记实际撞出来的。
+   * 从上游报错里学到的窗口大小，键包含 profileId、规范化 base URL 与 model。
+   * 内置对照表永远会缺你正在用的那条路由，所以这里只记录明确上游证据。
    */
   modelLimits?: Record<string, LearnedLimit>;
 }
@@ -296,6 +479,8 @@ export interface ChatStreamHandlers {
    * init 要过 IPC，函数过不去。
    */
   onPaceWait?(ms: number): void;
+  onDispatch?(): void;
+  onResponse?(status: number, headers: Record<string, string>): void;
   onDone(): void;
   /** status 是上游的 HTTP 状态码，拿不到时为 undefined（网络层直接挂了） */
   onError(message: string, status?: number): void;
@@ -326,6 +511,19 @@ export interface ChatRequestInit {
    * 排查用它把自己放慢到「不可能触发限流」的程度 —— 这样收到的限流才是证据。
    */
   paceMinMs?: number;
+  /** 这次请求大约要花多少 token —— TPM 令牌桶按它扣额度 */
+  paceTokens?: number;
+  /** 这条路由已知的 TPM 上限；未知就不启用令牌桶 */
+  paceTpm?: number;
+  runId?: string;
+  round?: number;
+  attempt?: number;
+  purpose?: 'agent' | 'final' | 'probe' | 'salvage' | 'compaction';
+  paceInput?: number;
+  paceOutput?: number;
+  paceItpm?: number;
+  paceOtpm?: number;
+  cachedInputCounts?: boolean;
 }
 
 export interface ToolResult {
@@ -343,6 +541,10 @@ export interface ToolResult {
    * 所以 agent 会在工具结果之后补一条带图的 user 消息。
    */
   imageDataUrl?: string;
+  files?: FileRecord[];
+  resultRef?: string;
+  /** 原生执行日志显示操作已开始但没有可靠完成记录。 */
+  uncertain?: boolean;
 }
 
 /**
@@ -390,6 +592,9 @@ export interface Artifact {
   /** kind==='inline' 时的正文 */
   text?: string;
   createdAt: number;
+  size?: number;
+  verifiedAt?: number;
+  direction?: 'input' | 'output';
 }
 
 /** 工具执行时传给原生层的上下文（不含明文密钥，密钥由原生层自己从安全存储取） */
@@ -406,6 +611,7 @@ export interface ToolContext {
   projectId: string | null;
   /** 本次会话临时授予的权限。原生层据此决定放不放行提权和屏幕控制 */
   grants: SessionGrants;
+  execution?: { runId: string; callId: string; retryUncertain?: boolean };
 }
 
 export interface Transport {

@@ -3,7 +3,7 @@ import { buildRequestBody } from './paramSchema';
 import type { EffortMapping } from './effort';
 import { isRateLimited, isTokenLimit, spacingForTokens } from './pacer';
 import { checkWire } from './wirecheck';
-import { estimateTokens } from './limits';
+import { estimateRequestTokens } from './limits';
 import type { WireMessage } from './paramSchema';
 
 /* ------------------------------------------------------------------ *
@@ -360,7 +360,7 @@ export async function probeHistory(
    * TPM 窗口里应占的时间。慢，但这正是「设计成不可能触发限流」的代价 ——
    * 也是这个结论能作数的前提。
    */
-  const totalTokens = estimateTokens(JSON.stringify(messages));
+  const totalTokens = estimateRequestTokens(messages);
   const perCall = spacingForTokens(totalTokens);
   let last = 0;
 

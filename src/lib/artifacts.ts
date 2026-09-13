@@ -1,5 +1,4 @@
 import type { Artifact, ToolStep } from '../types';
-import { uid } from './store';
 
 /* ------------------------------------------------------------------ *
  * 产物收集
@@ -26,6 +25,8 @@ const TYPE_BY_EXT: Record<string, string> = {
   '.csv': 'csv',
   '.json': 'json',
   '.txt': 'text',
+  '.ics': 'ics',
+  '.ical': 'ics',
 };
 
 export function typeOfPath(p: string): string {
@@ -41,7 +42,7 @@ export function baseName(p: string): string {
 
 /** 这个产物能不能在应用里直接预览 */
 export function previewable(type: string): boolean {
-  return ['html', 'svg', 'markdown', 'csv', 'json', 'text', 'code', 'mermaid'].includes(type);
+  return ['html', 'svg', 'markdown', 'csv', 'json', 'text', 'code', 'mermaid', 'ics'].includes(type);
 }
 
 /** 从工具步骤里挑出写到磁盘的文件 */
@@ -49,11 +50,20 @@ function fromSteps(steps: ToolStep[]): Artifact[] {
   const seen = new Set<string>();
   const out: Artifact[] = [];
   for (const s of steps) {
+    for (const f of s.files ?? []) {
+      const key = `${f.direction}:${f.path.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ id: `file-${key}`, kind: 'file', name: f.name, path: f.path,
+        type: typeOfPath(f.path), size: f.size, verifiedAt: f.verifiedAt,
+        direction: f.direction, createdAt: f.verifiedAt });
+    }
+    if (s.files?.length) continue;
     if (s.status !== 'ok' || !s.filePath) continue;
     if (seen.has(s.filePath)) continue;
     seen.add(s.filePath);
     out.push({
-      id: uid('art'),
+      id: `file-${s.filePath}`,
       kind: 'file',
       name: baseName(s.filePath),
       path: s.filePath,
@@ -81,7 +91,8 @@ function fromContent(content: string): Artifact[] {
     if (body.length < 80) continue;
 
     let type: string | null = null;
-    if (lang === 'mermaid') type = 'mermaid';
+    if (['ics', 'ical', 'icalendar'].includes(lang) && /BEGIN:VCALENDAR/i.test(body) && /END:VCALENDAR/i.test(body)) type = 'ics';
+    else if (lang === 'mermaid') type = 'mermaid';
     else if (lang === 'svg' || /^\s*<svg[\s>]/i.test(body)) type = 'svg';
     else if (
       (lang === 'html' || lang === 'htm') &&
@@ -93,9 +104,9 @@ function fromContent(content: string): Artifact[] {
 
     n += 1;
     out.push({
-      id: uid('art'),
+      id: `inline-${type}-${n}`,
       kind: 'inline',
-      name: type === 'mermaid' ? `图表 ${n}` : type === 'svg' ? `矢量图 ${n}` : `网页 ${n}`,
+      name: type === 'ics' ? `calendar-${n}.ics` : type === 'mermaid' ? `图表 ${n}` : type === 'svg' ? `矢量图 ${n}` : `网页 ${n}`,
       type,
       text: body,
       createdAt: Date.now(),
@@ -106,6 +117,18 @@ function fromContent(content: string): Artifact[] {
 
 export function collectArtifacts(content: string, steps: ToolStep[]): Artifact[] {
   return [...fromSteps(steps), ...fromContent(content)];
+}
+
+/** Candidates only; callers must verify these paths before showing a file as delivered. */
+export function filePathsInText(text: string): string[] {
+  const found = new Set<string>();
+  const ext = '(?:ics|ical|pdf|docx|xlsx|csv|tsv|json|txt|md|html|svg|png|jpg|zip)';
+  const windows = new RegExp('[A-Za-z]:[\\\\/][^\\r\\n<>"`|?*]*?\\.' + ext + '(?=$|[\\s`"<>）)\\]，。；;])', 'gi');
+  for (const m of text.matchAll(windows)) found.add(m[0]);
+  for (const m of text.matchAll(/(?:`|\]\(|\")((?:\/(?:Users|home|tmp|mnt|var)\/)[^`"\r\n]+)(?:`|\)|")/g)) {
+    if (new RegExp('\\.' + ext + '$', 'i').test(m[1])) found.add(m[1]);
+  }
+  return [...found].slice(0, 20);
 }
 
 /** 把内联产物包成一个能直接塞进 iframe 的完整页面 */

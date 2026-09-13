@@ -5,6 +5,7 @@ import { desktop } from '../lib/transport';
 import Markdown from './Markdown';
 
 const ICON: Record<string, string> = {
+  ics: '🗓',
   html: '🌐',
   svg: '🖼',
   markdown: '📝',
@@ -19,31 +20,55 @@ const ICON: Record<string, string> = {
   other: '📄',
 };
 
-/** 答案底部那一行产物卡片 */
-export function ArtifactStrip(props: {
-  artifacts: Artifact[];
-  onOpen: (a: Artifact) => void;
-}) {
-  if (!props.artifacts.length) return null;
-  return (
-    <div className="artifact-strip">
-      <div className="sources-label">产物 · {props.artifacts.length}</div>
-      <div className="sources-scroll">
-        {props.artifacts.map((a) => (
-          <button key={a.id} className="artifact-card" onClick={() => props.onOpen(a)}>
-            <div className="artifact-head">
-              <span className="artifact-icon">{ICON[a.type] ?? '📄'}</span>
-              <span className="artifact-type">{a.type}</span>
-            </div>
-            <div className="artifact-name" title={a.path ?? a.name}>
-              {a.name}
-            </div>
-            <div className="artifact-hint">{a.kind === 'file' ? '已写入磁盘' : '在答案里'}</div>
-          </button>
-        ))}
-      </div>
+function FileCard({ artifact: a, onOpen, onSaved }: { artifact: Artifact; onOpen: (a: Artifact) => void; onSaved?: (a: Artifact) => void }) {
+  const bridge = desktop();
+  const [error, setError] = React.useState('');
+  const [working, setWorking] = React.useState(false);
+  const action = async (fn: () => Promise<void>) => {
+    setError(''); setWorking(true);
+    try { await fn(); } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setWorking(false); }
+  };
+  const save = async () => {
+    if (bridge?.saveArtifact) {
+      const file = await bridge.saveArtifact(a.name, a.text, a.path);
+      if (file) onSaved?.({ ...a, id: `saved-${file.path}`, kind: 'file', path: file.path, name: file.name,
+        size: file.size, verifiedAt: file.verifiedAt, direction: 'output', createdAt: file.verifiedAt });
+    } else if (a.text !== undefined) {
+      const url = URL.createObjectURL(new Blob([a.text], { type: a.type === 'ics' ? 'text/calendar;charset=utf-8' : 'text/plain;charset=utf-8' }));
+      const link = document.createElement('a'); link.href = url; link.download = a.name; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } else throw new Error('请在保存该文件的桌面端打开');
+  };
+  return <div className="artifact-card file-card">
+    <button className="file-card-preview" onClick={() => onOpen(a)}>
+      <span className="artifact-icon">{ICON[a.type] ?? '📄'}</span>
+      <span className="file-card-description"><strong title={a.path ?? a.name}>{a.name}</strong>
+        <small>{a.direction === 'input' ? '输入文件' : '输出文件'} · {a.type.toUpperCase()}{a.size !== undefined ? ` · ${a.size < 1024 ? `${a.size} B` : `${(a.size/1024).toFixed(1)} KB`}` : ''}</small>
+      </span>
+    </button>
+    <div className="file-status">{a.path ? a.verifiedAt ? '已核实文件路径' : '历史文件记录，打开时核实' : '文件内容在对话中，可保存'}</div>
+    {a.path ? <div className="file-card-path" title={a.path}>{a.path}</div> : null}
+    <div className="file-card-actions">
+      {a.path && bridge ? <>
+        <button className="btn sm" disabled={working} onClick={() => void action(async () => { const err = await bridge.openPath(a.path!); if (err) throw new Error(err); })}>打开</button>
+        <button className="btn sm" disabled={working} onClick={() => void action(() => bridge.revealPath(a.path!))}>在文件夹中显示</button>
+      </> : null}
+      {(bridge?.saveArtifact || a.text !== undefined) ? <button className="btn sm" disabled={working} onClick={() => void action(save)}>{a.path ? '另存为' : '保存文件'}</button> : null}
     </div>
-  );
+    {error ? <div className="file-card-error" role="alert">{error}</div> : null}
+  </div>;
+}
+
+/** Input and output records are visible without opening the side panel. */
+export function ArtifactStrip(props: { artifacts: Artifact[]; onOpen: (a: Artifact) => void; onSaved?: (a: Artifact) => void }) {
+  if (!props.artifacts.length) return null;
+  return <div className="artifact-strip">
+    <div className="sources-label">本轮文件与产物 · {props.artifacts.length}</div>
+    <div className="file-card-grid">
+      {props.artifacts.map((a) => <FileCard key={a.id} artifact={a} onOpen={props.onOpen} onSaved={props.onSaved} />)}
+    </div>
+  </div>;
 }
 
 /* ------------------------------------------------------------------ *
@@ -150,10 +175,10 @@ export default function ArtifactPanel(props: { artifact: Artifact; onClose: () =
             </button>
             {bridge ? (
               <>
-                <button className="btn sm" onClick={() => void bridge.revealPath(a.path!)}>
+                <button className="btn sm" onClick={() => void bridge.revealPath(a.path!).catch((e) => setErr(String(e)))}>
                   在文件夹中显示
                 </button>
-                <button className="btn sm primary" onClick={() => void bridge.openPath(a.path!)}>
+                <button className="btn sm primary" onClick={() => void bridge.openPath(a.path!).then((e) => { if (e) setErr(e); }).catch((e) => setErr(String(e)))}>
                   用默认程序打开
                 </button>
               </>

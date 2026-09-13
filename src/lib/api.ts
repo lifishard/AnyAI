@@ -105,6 +105,8 @@ export async function fetchModels(
       id,
       label: typeof o.display_name === 'string' ? o.display_name : undefined,
       ownedBy: typeof o.owned_by === 'string' ? o.owned_by : undefined,
+      contextWindow: Number(o.context_window ?? o.context_length) > 0 ? Number(o.context_window ?? o.context_length) : undefined,
+      maxOutput: Number(o.max_output_tokens ?? o.max_completion_tokens) > 0 ? Number(o.max_output_tokens ?? o.max_completion_tokens) : undefined,
     });
   }
   // 去重 + 按 id 排序

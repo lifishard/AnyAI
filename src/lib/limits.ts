@@ -1,18 +1,6 @@
-/* ------------------------------------------------------------------ *
- * 上游到底给多大窗口 —— 从报错里学，而不是内置一张表
- *
- * BYOK 客户端没法预知每条路由的上下文窗口：同一个模型名在不同网关上
- * 可能是 32K，也可能是 200K，用户还能自己加自定义模型。内置一张对照表
- * 只会过时，而且永远缺那条你正在用的路由。
- *
- * 但有一件事是确定的：**窗口被撑破时，上游会在报错里把数字告诉你**。
- *   "This model's maximum context length is 32768 tokens, however you requested 36343"
- *   "Input length 28151 exceeds the maximum length 16384"
- *   "请求的 token 数超过模型上限 65536"
- *
- * 所以这里做两件事：从报错里把数字抠出来，记在这条路由名下；下次发请求
- * 之前拿它先自己压一压。撞一次墙，以后就不再撞同一堵。
- * ------------------------------------------------------------------ */
+import { isRateLimited } from './pacer';
+import type { ChatMessage } from '../types';
+/** Route observations come only from explicit upstream limits. Unknown stays unknown. */
 
 export interface LearnedLimit {
   /** 总窗口（输入 + 输出） */
@@ -21,6 +9,8 @@ export interface LearnedLimit {
   rpm?: number;
   /** 每分钟 token 上限 */
   tpm?: number;
+  itpm?: number;
+  otpm?: number;
   /**
    * 这条路由实际跑得稳的最小发送间隔。
    *
@@ -35,10 +25,28 @@ export interface LearnedLimit {
   at: number;
   /** 学习依据的那句原文，方便人核对 */
   from: string;
+  observedAt?: Partial<Record<'maxContext' | 'maxOutput' | 'rpm' | 'tpm' | 'itpm' | 'otpm' | 'minIntervalMs',number>>;
 }
 
-export function limitKey(profileId: string, model: string): string {
-  return `${profileId}::${model}`;
+export function mergeLearnedLimit(previous: LearnedLimit | undefined, next: LearnedLimit): LearnedLimit {
+  const out = { ...previous,...next,observedAt:{ ...previous?.observedAt,...next.observedAt } };
+  for (const key of ['maxContext','maxOutput','rpm','tpm','itpm','otpm','minIntervalMs'] as const) {
+    if (next[key] !== undefined) out.observedAt[key] = next.at;
+    else if (previous?.[key] !== undefined && out.observedAt[key] === undefined) out.observedAt[key] = previous.at;
+  }
+  return out;
+}
+export function quotaLimits(headers: Record<string,string>): Partial<LearnedLimit> {
+  const out: Partial<LearnedLimit> = {};
+  for (const [key,suffix] of [['rpm','requests'],['tpm','tokens'],['itpm','input-tokens'],['otpm','output-tokens']] as const) {
+    const n = Number(headers[`x-ratelimit-limit-${suffix}`] ?? headers[`anthropic-ratelimit-${suffix}-limit`]);
+    if (Number.isFinite(n) && n > 0) out[key] = Math.floor(n);
+  }
+  return out;
+}
+
+export function limitKey(profileId: string, model: string, baseUrl = ''): string {
+  return `${profileId}::${baseUrl.trim().replace(/\/+$/, '')}::${model}`;
 }
 
 /**
@@ -72,51 +80,32 @@ const OVERFLOW = new RegExp(
 );
 
 export function looksLikeOverflow(msg: string): boolean {
+  /*
+   * 限流提示优先按额度处理，不凭这条提示断言上下文过长。
+   *
+   * 这条守卫是实事故换来的。`inference exceeds tpm/rpm limit` 被上面的
+   * 「exceeds …… limit」抓中，于是一次限流被当成上下文超限，压缩重试三次、
+   * 耗掉十三分钟，最后给用户一张写着「压缩过之后仍然放不下」的卡片 ——
+   * 每一个字都是错的，而且指的方向也错。
+   *
+   * 单次请求也可能超过整分钟 TPM。它需要缩小请求预算，不能仅靠等待；
+   * 但 TPM 额度仍不是模型上下文窗口，两种上限应分别记录。
+   */
+  if (isRateLimited(msg || '')) return false;
   return OVERFLOW.test(msg || '');
 }
 
-/** 一句话里出现的、看起来像 token 数的数字（四位数以上，排除年份那种巧合） */
-function numbersIn(msg: string): number[] {
-  const out: number[] = [];
-  for (const m of msg.matchAll(/(\d[\d,_]{2,})\s*(k\b)?/gi)) {
-    const n = Number(m[1].replace(/[,_]/g, ''));
-    if (!Number.isFinite(n)) continue;
-    const scaled = m[2] ? n * 1024 : n;
-    if (scaled >= 1000 && scaled <= 10_000_000) out.push(scaled);
-  }
-  return out;
-}
-
-/**
- * 从报错里学窗口大小。
- *
- * 典型句式是「上限是 A，你要了 B」，A < B。所以拿到多个数时取**最小**的那个
- * 当上限 —— 大的那个是「你要了多少」，不是「能要多少」。取错方向的话，
- * 下次会照着一个比真实窗口还大的数去压，等于没压。
- */
+/** Learn only an explicitly named upper bound, never the smallest incidental number. */
 export function parseLimits(msg: string): { maxContext?: number; maxOutput?: number } {
-  if (!msg || !looksLikeOverflow(msg)) return {};
-
-  // 这句话在说输出上限，还是总窗口？两者要分开记 —— 把输出上限当成窗口，
-  // 下次会把整段历史压到 16K，白白扔掉一半上下文
-  const aboutOutput =
-    /max_?tokens|completion|output|生成长度|输出/i.test(msg) &&
-    !/context|prompt|input|messages|上下文|输入/i.test(msg);
-
-  // 先试精确句式：maximum context length is N
-  const exact = msg.match(
-    /(?:maximum|max)[^.\d]{0,32}(?:context|input|prompt)[^.\d]{0,24}?(\d[\d,_]*)/i,
-  );
-  if (exact && !aboutOutput) {
-    const n = Number(exact[1].replace(/[,_]/g, ''));
-    if (Number.isFinite(n) && n >= 1000) return { maxContext: n };
-  }
-
-  const ns = numbersIn(msg);
-  if (!ns.length) return {};
-  // 「上限 A，你要了 B」里 A < B，所以取最小的那个当上限
-  const smallest = Math.min(...ns);
-  return aboutOutput ? { maxOutput: smallest } : { maxContext: smallest };
+  if (!msg || isRateLimited(msg)) return {};
+  const context = msg.match(/(?:maximum|max)\s+context\s+(?:length|window)(?:\s+(?:is|of))?\s*[:=]?\s*(\d[\d,_]*)/i)
+    ?? msg.match(/(?:context(?:_length| window| length))\s*(?:limit|maximum|max)\s*[:=]?\s*(\d[\d,_]*)/i)
+    ?? msg.match(/(?:上下文|输入)(?:窗口|长度)?(?:上限|最大值)(?:为|是)?\s*[:：]?\s*(\d[\d,_]*)/);
+  const output = msg.match(/(?:maximum|max)\s+(?:output|completion)\s+(?:tokens|length)(?:\s+(?:is|of))?\s*[:=]?\s*(\d[\d,_]*)/i)
+    ?? msg.match(/max_(?:completion_)?tokens\s+(?:must be|cannot be|should be)\s*(?:<=|less than or equal to)\s*(\d[\d,_]*)/i);
+  const value = (m: RegExpMatchArray | null) => m ? Number(m[1].replace(/[,_]/g,'')) : undefined;
+  const c = value(context), o = value(output);
+  return { ...(c && c >= 1024 ? { maxContext:c } : {}), ...(o && o > 0 ? { maxOutput:o } : {}) };
 }
 
 /**
@@ -127,7 +116,7 @@ export function parseLimits(msg: string): { maxContext?: number; maxOutput?: num
  */
 export function inputBudget(limit: LearnedLimit | undefined, wantOutput: number): number | null {
   if (!limit?.maxContext) return null;
-  const reserve = Math.max(1024, Math.min(wantOutput || 4096, Math.floor(limit.maxContext * 0.25)));
+  const reserve = Math.max(1024, wantOutput || 4096);
   return Math.max(1024, limit.maxContext - reserve);
 }
 
@@ -152,6 +141,48 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / perToken);
 }
 
+/**
+ * Images are decoded by the model endpoint; their Base64 transport bytes are not
+ * text tokens. Use a provider-neutral image allowance until actual usage arrives.
+ * This is an estimate, not a claim about a particular model's vision tokenizer.
+ */
+export const IMAGE_TOKEN_ALLOWANCE = 2048;
+export function estimateRequestTokens(request: unknown): number {
+  let images = 0;
+  const messageView = (message: unknown): unknown => {
+    if (!message || typeof message !== 'object') return message;
+    const m = message as Record<string, unknown>;
+    if (!Array.isArray(m.content)) return m;
+    return { ...m, content: m.content.map((part: unknown) => {
+      if (!part || typeof part !== 'object') return part;
+      const p = part as Record<string, unknown>;
+      const image = p.image_url as { url?: unknown; detail?: unknown } | undefined;
+      if (p.type !== 'image_url' || !image || typeof image.url !== 'string') return part;
+      images++;
+      return { type: 'image_url', image_url: { detail: image.detail ?? 'auto' } };
+    }) };
+  };
+  let view: unknown = request;
+  if (Array.isArray(request)) view = request.map(messageView);
+  else if (request && typeof request === 'object') {
+    const body = request as Record<string, unknown>;
+    if (Array.isArray(body.messages)) view = { ...body, messages: body.messages.map(messageView) };
+  }
+  return estimateTokens(JSON.stringify(view) ?? '') + images * IMAGE_TOKEN_ALLOWANCE;
+}
+
+/** Count the material that will be sent, without serializing attachment images as text. */
+export function estimateChatTokens(messages: ChatMessage[]): number {
+  return estimateRequestTokens(messages.map((m) => {
+    const text = [m.content, ...(m.quotes ?? []).map((q) => q.text),
+      ...(m.attachments ?? []).filter((a) => a.kind === 'text').map((a) => `附件《${a.name}》：\n${a.text ?? ''}`)].join('\n');
+    const images = (m.attachments ?? []).filter((a) => a.kind === 'image' && a.dataUrl)
+      .map((a) => ({ type: 'image_url', image_url: { url: a.dataUrl! } }));
+    return { role: m.role, content: images.length ? [{ type: 'text', text }, ...images] : text,
+      tool_calls: m.toolCalls, tool_call_id: m.toolCallId, name: m.toolName };
+  }));
+}
+
 
 /* ------------------------------------------------------------------ *
  * 限流上限也照着学
@@ -171,7 +202,7 @@ export function parseRateLimits(msg: string): { rpm?: number; tpm?: number } {
   const rpm =
     msg.match(/(\d[\d,_]*)\s*(?:requests?|次|请求)[^.\d]{0,12}(?:per|\/|每)\s*(?:min|minute|分钟)/i) ??
     msg.match(/每\s*分钟[^\d]{0,10}(\d[\d,_]*)\s*(?:次|请求)/) ??
-    msg.match(/rpm[^\d]{0,12}(\d[\d,_]*)/i);
+    msg.match(/\brpm\s*(?:limit\s*)?(?:[:=]|is)\s*(\d[\d,_]*)/i);
   if (rpm) {
     const n = Number(rpm[1].replace(/[,_]/g, ''));
     if (Number.isFinite(n) && n > 0) out.rpm = n;
@@ -180,7 +211,7 @@ export function parseRateLimits(msg: string): { rpm?: number; tpm?: number } {
   const tpm =
     msg.match(/(\d[\d,_]*)\s*tokens?[^.\d]{0,12}(?:per|\/|每)\s*(?:min|minute|分钟)/i) ??
     msg.match(/每\s*分钟[^\d]{0,10}(\d[\d,_]*)\s*token/i) ??
-    msg.match(/tpm[^\d]{0,12}(\d[\d,_]*)/i);
+    msg.match(/\btpm\s*(?:limit\s*)?(?:[:=]|is)\s*(\d[\d,_]*)/i);
   if (tpm) {
     const n = Number(tpm[1].replace(/[,_]/g, ''));
     if (Number.isFinite(n) && n > 0) out.tpm = n;
@@ -222,7 +253,7 @@ export function pacingFloor(
 
 /** 给设置界面用的一句话 */
 export function describeLimit(l: LearnedLimit | undefined): string {
-  if (!l) return '还没撞过，没有记录';
+  if (!l) return '尚无上游提供的限额记录';
   const bits: string[] = [];
   if (l.maxContext) bits.push(`窗口 ${l.maxContext} token`);
   if (l.rpm) bits.push(`${l.rpm} 次/分`);

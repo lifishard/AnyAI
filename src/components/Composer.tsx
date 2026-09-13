@@ -12,6 +12,8 @@ import type { ProjectPrompt } from '../lib/projects';
 import { matchSkills, slashQuery } from '../lib/skills';
 import EffortPicker from './EffortPicker';
 import ModelPicker from './ModelPicker';
+import ContextMeter, { type ContextPreview } from './ContextMeter';
+import { routeKey } from '../lib/adaptive';
 
 const APPROVAL_OPTIONS: { value: ApprovalMode; label: string; desc: string }[] = [
   {
@@ -32,6 +34,13 @@ const APPROVAL_OPTIONS: { value: ApprovalMode; label: string; desc: string }[] =
 ];
 
 export default function Composer(props: {
+  contextPreview?: ContextPreview;
+  quotes: import('../types').MessageQuote[];
+  quoteOnly: boolean;
+  onQuoteOnly: (only: boolean) => void;
+  onRemoveQuote: (id: string) => void;
+  queuePaused: boolean;
+  onResumeQueue: () => void;
   busy: boolean;
   disabled: boolean;
   disabledReason?: string;
@@ -91,12 +100,15 @@ export default function Composer(props: {
   onDropQueued: (index: number) => void;
 }) {
   const [text, setText] = React.useState('');
+  const contextDraft = React.useMemo(() => ({ id:'draft', role:'user' as const, content:text, createdAt:0,
+    attachments:props.attachments, quotes:props.quotes, quoteOnly:props.quoteOnly && props.quotes.length > 0 }),[text,props.attachments,props.quotes,props.quoteOnly]);
   const [plusOpen, setPlusOpen] = React.useState(false);
   const [approvalOpen, setApprovalOpen] = React.useState(false);
   const [caret, setCaret] = React.useState(0);
   const [slashIndex, setSlashIndex] = React.useState(0);
   const ref = React.useRef<HTMLTextAreaElement>(null);
   const barRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => { if (props.quotes.length) ref.current?.focus(); }, [props.quotes.length]);
 
   /* ---- 斜杠唤起技能 ---- */
   const slashQ = slashQuery(text, caret);
@@ -219,6 +231,19 @@ export default function Composer(props: {
     <div className="composer-wrap">
       <div className="composer">
         <div className="composer-box">
+          {props.quotes.length ? (
+            <div className="quote-draft">
+              {props.quotes.map((q) => (
+                <div className="quote-draft-item" key={q.id}>
+                  <span className="quote-mark">“</span><div>{q.text}</div>
+                  <button className="icon-btn" aria-label="移除引用" onClick={() => props.onRemoveQuote(q.id)}>✕</button>
+                </div>
+              ))}
+              <label className="quote-scope"><input type="checkbox" checked={props.quoteOnly} onChange={(e) => props.onQuoteOnly(e.target.checked)} />
+                只发送引用段落和本次问题，保留项目规范
+              </label>
+            </div>
+          ) : null}
           {props.queued.length ? (
             <div className="queue-row">
               {props.queued.map((q, i) => (
@@ -232,7 +257,8 @@ export default function Composer(props: {
                   </button>
                 </span>
               ))}
-              <span className="queue-note">排队中，这一轮结束后依次发出</span>
+              <span className="queue-note">{props.queuePaused ? '队列已暂停' : '排队中，这一轮结束后依次发出'}</span>
+              {props.queuePaused ? <button className="btn sm" onClick={props.onResumeQueue}>继续队列</button> : null}
             </div>
           ) : null}
 
@@ -460,6 +486,7 @@ export default function Composer(props: {
             <span className="spacer" />
 
             {/* ---- 右下角 ---- */}
+            {props.contextPreview ? <ContextMeter preview={props.contextPreview} draft={contextDraft} /> : null}
             {props.toolCount > 0 ? <span className="chip">{props.toolCount} 工具</span> : null}
             {!props.stream ? <span className="chip">非流式</span> : null}
 
@@ -468,6 +495,7 @@ export default function Composer(props: {
               onLevel={props.onEffortLevel}
               model={props.model}
               mappings={props.effortMappings}
+              route={props.contextPreview?.profile.routeProfiles?.[routeKey(props.contextPreview.profile,props.model)]}
               manual={props.effortManual}
               onOpenMappings={props.onOpenMappings}
             />

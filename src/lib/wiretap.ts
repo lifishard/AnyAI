@@ -1,120 +1,73 @@
-/* ------------------------------------------------------------------ *
- * 原始往返记录
- *
- * 为什么需要这个东西：当模型说「我现在就调用工具」然后停住，
- * 站在应用这一侧能看到的只有「没有工具调用」。至于是
- *
- *   - 请求里压根没带 tools（应用的锅）
- *   - 带了，但网关转发时丢了（网关的锅）
- *   - 都对，模型自己没调（模型的锅）
- *
- * ——光看现象分不出来，只能猜。猜了三轮还没猜中的事，应该换成看。
- *
- * 所以这里把**最近一次**请求体和**未经解析的**响应原文留一份。
- * 只留一次、只在内存里、不落盘：它是给人看一眼就走的证据，
- * 不是日志系统。密钥在 headers 里，而 headers 从来不进这里。
- * ------------------------------------------------------------------ */
-
+/** Per-request diagnostics. A retry never replaces the request that failed. */
 export interface Exchange {
+  requestId: string;
+  runId?: string;
+  round?: number;
+  attempt?: number;
+  purpose?: string;
   at: number;
+  endedAt?: number;
   url: string;
   stream: boolean;
-  /** 实际发出去的请求体（不含 headers，所以不含密钥） */
   request: unknown;
-  /** 上游回来的原文：流式是 SSE 全文，非流式是整包 JSON */
   raw: string;
   truncated: boolean;
+  status?: number;
+  responseHeaders?: Record<string, string>;
+  error?: string;
 }
-
-/** 原文留这么多就够看清结构了，再多只是撑爆内存 */
 const RAW_CAP = 256_000;
-
-let last: Exchange | null = null;
-
-export function beginExchange(init: { url: string; body: unknown; stream: boolean }): void {
-  last = {
-    at: Date.now(),
-    url: init.url,
-    stream: init.stream,
-    request: init.body,
-    raw: '',
-    truncated: false,
-  };
+const exchanges: Exchange[] = [];
+export function beginExchange(init: { requestId?: string; runId?: string; round?: number; attempt?: number; purpose?: string; url: string; body: unknown; stream: boolean }): void {
+  exchanges.push({ ...init, requestId: init.requestId || `request-${Date.now()}`, at: Date.now(), request: init.body, raw: '', truncated: false });
+  if (exchanges.length > 40) exchanges.shift();
 }
-
-export function recordRaw(text: string): void {
-  if (!last || !text) return;
-  if (last.raw.length >= RAW_CAP) {
-    last.truncated = true;
-    return;
-  }
-  last.raw += text.slice(0, RAW_CAP - last.raw.length);
-  if (last.raw.length >= RAW_CAP) last.truncated = true;
+export function lastExchange(): Exchange | null { return exchanges.at(-1) ?? null; }
+export function exchangeOf(id?: string): Exchange | null {
+  return id ? exchanges.find((e) => e.requestId === id) ?? null : lastExchange();
 }
-
-export function lastExchange(): Exchange | null {
-  return last;
+export function failedExchange(runId?: string): Exchange | null {
+  return [...exchanges].reverse().find((e) => e.error && (!runId || e.runId === runId) && e.purpose !== 'probe') ?? null;
 }
-
-/** 请求体里最该先看的那几件事，省得人在几百行 JSON 里找 */
-function verdict(req: unknown, raw: string): string[] {
-  const out: string[] = [];
-  const body = (req ?? {}) as Record<string, unknown>;
-  const tools = Array.isArray(body.tools) ? body.tools : null;
-
-  if (!tools) {
-    out.push(
-      '⚠ 请求体里**没有 tools 字段** —— 模型手上一个工具都没有，' +
-        '它说要调用工具也只能是空话。去右侧配置面板确认「给模型下发工具」开着，' +
-        '并且下面至少勾了一个工具。',
-    );
-  } else {
-    out.push(`✓ 下发了 ${tools.length} 个工具`);
-  }
-
-  if (body.stream === false) out.push('· 非流式模式');
-  if (!raw.trim()) {
-    out.push('⚠ 上游一个字节都没回 —— 连 SSE 头都没有');
-  } else {
-    const hasToolCall = /"tool_calls"|"function_call"/.test(raw);
-    const fr = [...raw.matchAll(/"(?:finish|stop)_reason"\s*:\s*"([^"]+)"/g)].map((m) => m[1]);
-    out.push(hasToolCall ? '✓ 响应原文里出现过 tool_calls' : '⚠ 响应原文里**从头到尾没有 tool_calls**');
-    out.push(
-      fr.length
-        ? `· 上游给的结束原因：${[...new Set(fr)].join('、')}`
-        : '⚠ 上游全程没给 finish_reason —— 这种情况下应用无法区分「答完了」和「被掐断」',
-    );
-  }
+export function importExchanges(items: Exchange[]): void {
+  for (const e of items) if (!exchangeOf(e.requestId)) exchanges.push(e);
+  exchanges.sort((a,b) => a.at-b.at);
+  if (exchanges.length > 100) exchanges.splice(0, exchanges.length-100);
+}
+export function recordRaw(text: string, requestId?: string): void {
+  const e = exchangeOf(requestId); if (!e || !text) return;
+  const room = RAW_CAP-e.raw.length;
+  e.raw += text.slice(0, Math.max(0,room));
+  if (text.length > room) e.truncated = true;
+}
+export function recordResponse(id: string, status: number, headers: Record<string,string>): void {
+  const e = exchangeOf(id); if (e) { e.status = status; e.responseHeaders = headers; }
+}
+export function endExchange(id: string, error?: string, status?: number): void {
+  const e = exchangeOf(id); if (!e) return;
+  e.endedAt = Date.now(); if (error) e.error = error; if (status !== undefined) e.status = status;
+}
+function verdict(e: Exchange): string[] {
+  const req = (e.request ?? {}) as Record<string, unknown>;
+  const out = [`阶段：${e.purpose || 'agent'}；轮次：${e.round ?? '—'}；尝试：${e.attempt ?? '—'}`];
+  out.push(Array.isArray(req.tools) ? `下发 ${req.tools.length} 个工具` : '本次未下发工具（纯文本、收尾或部分诊断请求可以不带工具）');
+  out.push(e.status ? `收到 HTTP ${e.status}` : '尚未记录到 HTTP 响应状态');
+  if (e.error) out.push(`失败信息：${e.error}`);
+  if (!e.raw.trim()) out.push('未记录到响应正文；不能据此推断上游没有返回响应头。');
+  const reasons = [...e.raw.matchAll(/"(?:finish|stop)_reason"\s*:\s*"([^"]+)"/g)].map((m) => m[1]);
+  if (reasons.length) out.push(`结束原因：${[...new Set(reasons)].join('、')}`);
   return out;
 }
-
-/** 拼成能直接贴给别人看的一段文本 */
-export function formatExchange(): string {
-  if (!last) return '还没有发过请求。先在对话里问一句，再回来看这里。';
-  const ago = Math.round((Date.now() - last.at) / 1000);
-  const head = [
-    `时间：${ago} 秒前`,
-    `地址：${last.url}`,
-    `流式：${last.stream ? '是' : '否'}`,
-    '',
-    '—— 先看这几条 ——',
-    ...verdict(last.request, last.raw),
-    '',
-    '—— 发出去的请求体（不含 headers，所以不含你的 key）——',
+export function formatExchange(selected?: Exchange | null): string {
+  const e = selected ?? failedExchange() ?? lastExchange();
+  if (!e) return '还没有请求记录。';
+  const list = exchanges.filter((x) => !e.runId || x.runId === e.runId).slice(-20);
+  return [
+    '请求记录（优先显示失败请求；不含请求 headers）',
+    ...list.map((x) => `${x.requestId === e.requestId ? '→' : '·'} ${x.requestId} | ${x.purpose || 'agent'} | 轮次 ${x.round ?? '—'} | HTTP ${x.status ?? '—'} | ${x.error || '无已记录错误'}`),
+    '', `请求编号：${e.requestId}`, `地址：${e.url}`, ...verdict(e),
+    '', '—— 响应元数据 ——', JSON.stringify(e.responseHeaders ?? {}, null, 2),
+    '', '—— 实际发送的请求体 ——', JSON.stringify(e.request, null, 2),
+    '', `—— 响应原文${e.truncated ? '（已截断）' : ''} ——`, e.raw || '（空）',
   ].join('\n');
-
-  let req: string;
-  try {
-    req = JSON.stringify(last.request, null, 2);
-  } catch {
-    req = String(last.request);
-  }
-
-  const tail = [
-    '',
-    `—— 上游回来的原文${last.truncated ? `（只留了前 ${RAW_CAP} 字）` : ''} ——`,
-    last.raw || '（空）',
-  ].join('\n');
-
-  return `${head}\n${req}\n${tail}`;
 }
