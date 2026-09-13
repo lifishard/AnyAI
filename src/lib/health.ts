@@ -9,6 +9,8 @@ import type {
 import { buildHeaders, endpoint } from './api';
 import { getTransport } from './transport';
 import { classifyError } from './errors';
+import { pacingFloor, parseRateLimits, type LearnedLimit } from './limits';
+import { isRateLimited, paceOf } from './pacer';
 
 /* ------------------------------------------------------------------ *
  * 模型健康度
@@ -198,6 +200,8 @@ async function probeOne(
   apiKey: string,
   modelId: string,
   timeoutMs: number,
+  limitOf?: (model: string) => LearnedLimit | undefined,
+  onLearnLimit?: (model: string, l: LearnedLimit) => void,
 ): Promise<{ ok: boolean; info?: ErrorInfo; hollow?: boolean }> {
   let failMsg: string | null = null;
   let failStatus: number | undefined;
@@ -217,6 +221,15 @@ async function probeOne(
       },
       stream: false,
       timeoutMs,
+      /*
+       * 体检必须跟正常对话排在**同一条队伍**里。
+       *
+       * 之前这里什么都没传，于是它按地址分组，跟对话各排各的 —— 一边在
+       * 聊天一边点体检，两条队伍互相看不见，加起来就把配额打爆了。
+       * 配额是按凭据算的，队伍也必须按凭据分。
+       */
+      paceKey: profile.id,
+      paceMinMs: pacingFloor(limitOf?.(modelId), 32),
     },
     {
       onContent(d) {
@@ -240,7 +253,18 @@ async function probeOne(
   // 有些网关把非聊天模型（图像生成之类）也列进 /models，请求打过去返回 200
   // 但正文里什么都没有。这种不算坏，但也不该打上「体检通过」的勾。
   if (failMsg === null) return { ok: true, hollow: !sawAnything };
-  return { ok: false, info: classifyError(failMsg, failStatus, { model: modelId }) };
+
+  // 体检撞到的限流跟对话撞到的是同一条线，学到的东西也该记在同一个地方
+  const msg: string = failMsg;
+  if (isRateLimited(msg, failStatus)) {
+    onLearnLimit?.(modelId, {
+      ...parseRateLimits(msg),
+      minIntervalMs: paceOf(profile.id).intervalMs,
+      at: Date.now(),
+      from: msg.slice(0, 300),
+    });
+  }
+  return { ok: false, info: classifyError(msg, failStatus, { model: modelId }) };
 }
 
 function toHealth(r: { ok: boolean; info?: ErrorInfo; hollow?: boolean }): ModelHealth {
@@ -287,6 +311,10 @@ export async function probeModels(opts: {
   concurrency?: number;
   onProgress?: (p: ProbeProgress) => void;
   shouldStop?: () => boolean;
+  /** 这条凭据下某个模型已知的限流上限 */
+  limitOf?: (model: string) => LearnedLimit | undefined;
+  /** 体检过程中学到的新上限 */
+  onLearnLimit?: (model: string, l: LearnedLimit) => void;
 }): Promise<ProbeOutcome> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
   const total = opts.models.length;
@@ -315,7 +343,7 @@ export async function probeModels(opts: {
 
       opts.onProgress?.({ done, total, current: id });
 
-      let r = await probeOne(opts.profile, opts.apiKey, id, timeoutMs);
+      let r = await probeOne(opts.profile, opts.apiKey, id, timeoutMs, opts.limitOf, opts.onLearnLimit);
 
       // key 不对 / 余额没了：再测下去只会得到一堆假阴性
       if (!r.ok && (r.info!.kind === 'auth' || r.info!.kind === 'quota')) {
@@ -332,7 +360,7 @@ export async function probeModels(opts: {
           stopped = true;
           return;
         }
-        r = await probeOne(opts.profile, opts.apiKey, id, timeoutMs);
+        r = await probeOne(opts.profile, opts.apiKey, id, timeoutMs, opts.limitOf, opts.onLearnLimit);
       }
 
       const h = toHealth(r);

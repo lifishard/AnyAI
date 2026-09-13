@@ -18,7 +18,7 @@ import type {
 import { SEED_MODELS, buildHeaders, endpoint, fetchModels, previewBody } from './lib/api';
 import { PROBE_SPACING_MS, probe400, probeHistory, type ProbeStep } from './lib/probe400';
 import { formatExchange } from './lib/wiretap';
-import { limitKey } from './lib/limits';
+import { limitKey, pacingFloor } from './lib/limits';
 import { buildWire, runAgent, type AgentHandle } from './lib/agent';
 import {
   clearHealth,
@@ -537,6 +537,20 @@ export default function App() {
       onProgress: (p: ProbeProgress) =>
         setProbe({ done: p.done, total: p.total, current: p.current }),
       shouldStop: () => probeStopRef.current,
+      // 体检跟对话共用同一份「这条路由的脾气」：读同一份记录，也往回写
+      limitOf: (m) => settingsRef.current?.modelLimits?.[limitKey(profile.id, m)],
+      onLearnLimit: (m, l) =>
+        setSettings((prev) =>
+          prev
+            ? {
+                ...prev,
+                modelLimits: {
+                  ...(prev.modelLimits ?? {}),
+                  [limitKey(profile.id, m)]: { ...(prev.modelLimits?.[limitKey(profile.id, m)] ?? {}), ...l },
+                },
+              }
+            : prev,
+        ),
     });
 
     setSettings((prev) =>
@@ -733,7 +747,13 @@ export default function App() {
               // 只有当这串请求**在设计上就不可能**打爆配额时，
               // 它返回的限流才是证据，而不是它自己造出来的假象。
               paceKey: profile.id,
-              paceMinMs: PROBE_SPACING_MS,
+              // 排查有自己的下限（保证它不可能触发限流），但如果这条路由
+              // 之前撞出来的节奏更慢，就听更慢的那个 —— 学到的东西不该被
+              // 一个常数盖掉
+              paceMinMs: Math.max(
+                PROBE_SPACING_MS,
+                pacingFloor(settingsRef.current?.modelLimits?.[limitKey(profile.id, cfg.model)], 32),
+              ),
             },
             {
               onContent() {},
