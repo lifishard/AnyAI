@@ -129,25 +129,25 @@ git push -u origin main
 每次 push 和 PR 触发：`tsc --noEmit`（**阻断**）→ `vite build` →
 `electron-builder --linux --dir` 验证打包配置能过。
 
-本地那套「类型错也放行」是为了让你拿到能跑的 exe；进仓库的代码不给这个宽限。
+本地打包和发布流程也会阻断类型错误。
 
 ### 发版（`.github/workflows/release.yml`）
 
-打 tag 触发：
+Windows 双击 **`发布三平台版本.bat`**。它会先检查类型、密钥和测试，再提交、推送源码并推送当前版本标签。普通的 `同步到github.bat` 只同步源码，不创建 Release。
+
+macOS / Linux 或命令行使用：
 
 ```bash
-npm version 1.0.1 --no-git-tag-version   # 改 package.json 里的版本号
-git commit -am "v1.0.1"
-git tag v1.0.1
-git push && git push --tags
+node scripts/sync-github.mjs --release
 ```
 
-之后 Actions 会在 **Windows / macOS / Linux 三个 runner** 上并行打包，
-产物自动传到一个 draft release 里。`fail-fast: false` —— 一个平台挂了不影响另外两个。
+首次发布当前版本可直接运行；下一次发布前用 `npm version <新版本> --no-git-tag-version` 同时更新版本和锁文件，并准备 `docs/releases/v<新版本>.md`。脚本不会覆盖指向其他提交的同名标签。
 
-去仓库的 Releases 页把 draft 编辑一下发布即可。
+Actions 在 **Windows / macOS / Linux 三个平台**分别检查、测试和打包。三个构建全部成功后，统一核对 8 个安装包：Windows 安装版和便携版、macOS Intel / Apple Silicon 各一份 DMG 和 ZIP、Linux AppImage 和 DEB。再上传到草稿，检查上传后的名称和大小，全部通过才自动公开 Release。某个平台失败时不会公开不完整版本。
 
-也可以在 Actions 页手动触发，勾上 `dry_run` 只打包不发布，用来验证工作流本身。
+Release 还包含 `SHA256SUMS.txt` 和 `release-manifest.json`，记录文件大小、校验值和源码提交。已公开的版本不自动覆盖。
+
+可在 Actions 页手动触发：默认勾选 `dry_run` 只构建；发布必须选择对应版本标签并取消 `dry_run`。失败后可重跑工作流，已公开版本会拒绝再次上传。
 
 **不需要配任何 secret。** 用的是 Actions 自带的 `GITHUB_TOKEN`，
 仓库地址 electron-builder 会从 `GITHUB_REPOSITORY` 环境变量自己认。

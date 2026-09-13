@@ -73,7 +73,7 @@ AnyAI 的核心是跨模型的任务连续性：模型负责推理与行动选�
 
 | 平台 | 文件 |
 |---|---|
-| Windows | `AnyAI-x.y.z-win-x64.exe`（安装版）或带 `portable` 的免安装版 |
+| Windows | `AnyAI-x.y.z-win-x64-setup.exe`（安装版）或带 `portable` 的免安装版 |
 | macOS | `AnyAI-x.y.z-mac-arm64.dmg`（Apple Silicon）/ `-x64.dmg`（Intel） |
 | Linux | `AnyAI-x.y.z-linux-x64.AppImage` 或 `.deb` |
 
@@ -96,6 +96,7 @@ npm run dist:win      # 或 dist:mac / dist:linux
 ```
 
 Windows 上不想开命令行：双击 `打包桌面版.bat`。
+维护者发布三平台安装包：双击 `发布三平台版本.bat`，通过 GitHub Actions 构建并发布；`同步到github.bat` 只同步源码。
 完整说明（含 Android、两个常见的 Windows 打包失败、发版流程）见 [docs/BUILD.md](docs/BUILD.md)。
 
 ## 五分钟跑起来
@@ -146,7 +147,7 @@ Agent 循环 (src/lib/agent.ts)
 
 ## 项目状态
 
-1.0.0，能用，但有几件事没验证过，写在这里免得你踩：
+当前版本 1.3.1。以下能力仍有验证限制：
 
 - **Android 端完全没在真机上跑过。** 那个 Java 插件的流式读取（跨块的多字节 UTF-8）
   是按原理写的，没验证

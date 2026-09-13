@@ -28,7 +28,7 @@
     "build:fast": "vite build",
     "dist:win:fast": "npm run build:fast && node scripts/package-release.mjs --win",
     "init-repo": "node scripts/init-repo.mjs",
-    "release": "npm run build:fast && electron-builder --publish always",
+    "release": "node scripts/sync-github.mjs --release",
     "sync:check": "node scripts/sync-github.mjs --check-only"
   },
   "dependencies": {

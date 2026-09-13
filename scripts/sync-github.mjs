@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseStatus, scanText, scanWorkingFiles } from './sync-checks.mjs';
+import { releaseTag } from './release-tag.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2), checkOnly = args.includes('--check-only');
 const git = values => execFileSync('git', values, { cwd: root, encoding: 'utf8', maxBuffer: 64*1024*1024 });
@@ -27,6 +28,7 @@ try {
   const candidates = git(['ls-files','-co','--exclude-standard','-z']).split('\0').filter(Boolean);
   const hits = scanWorkingFiles(root,candidates);
   if (hits.length) throw new Error('发现疑似密钥（未改动暂存区）：\n'+hits.slice(0,20).map(h=>`  ${h.file}:${h.line} — ${h.kind}（内容隐藏）`).join('\n'));
+  if(args.includes('--release'))execFileSync(process.execPath,['--test',...fs.readdirSync(path.join(root,'tests')).filter(n=>n.endsWith('.test.cjs')).map(n=>path.join('tests',n))],{cwd:root,stdio:'inherit'});
   if (checkOnly) console.log('✓ 推送前检查通过；未暂存、提交或推送。');
   else {
     git(['remote','get-url','origin']);
@@ -41,6 +43,11 @@ try {
     }
     // A previous attempt may have committed successfully and failed only at push.
     push();
+    if(args.includes('--release')){
+      const version=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version;
+      const release=releaseTag(root,version);
+      console.log(release.alreadyPushed?`${release.tag} 已推送过；可在 GitHub Actions 查看或重新运行 Release。`:`✓ 已触发 ${release.tag} 的三平台构建；全部成功后自动公开 Release。`);
+    }else console.log('生成三平台安装包并发布：双击“发布三平台版本.bat”。');
   }
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
