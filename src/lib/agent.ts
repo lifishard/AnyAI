@@ -20,7 +20,17 @@ import { backoffMs, classifyError, stopReasonInfo } from './errors';
 import { getTransport } from './transport';
 import { uid } from './store';
 import { composeSystem } from './system';
-import { estimateTokens, inputBudget, looksLikeOverflow, parseLimits, type LearnedLimit } from './limits';
+import { checkWire, describeWire, type WireProblem } from './wirecheck';
+import {
+  estimateTokens,
+  inputBudget,
+  looksLikeOverflow,
+  pacingFloor,
+  parseLimits,
+  parseRateLimits,
+  type LearnedLimit,
+} from './limits';
+import { isRateLimited, paceOf } from './pacer';
 
 export interface AgentEvents {
   onContentDelta(s: string): void;
@@ -153,7 +163,36 @@ function toWire(
   const sys = composeSystem(cfg.systemPrompt, extraSystem, withTools);
   if (sys) out.unshift({ role: 'system', content: sys });
 
-  return out;
+  /*
+   * 最后过一遍结构自检。位置很关键：**必须在所有裁剪之后**。
+   *
+   * 按条数截断、按 error 过滤、上下文压缩、中段折叠 —— 上面每一步都可能
+   * 把一对 assistant/tool 拆散，而拆散的结果就是上游一句
+   * 「inference request is invalid」，不告诉你是第几条消息的事。
+   *
+   * 修好的那份直接发出去；修了什么记在 lastWireProblems 里，
+   * 界面想说明就能说明。
+   */
+  const checked = checkWire(out);
+  lastWireProblems = checked.problems;
+  return checked.messages;
+}
+
+/**
+ * 按真实规则把一段对话组装成请求体里的 messages。
+ *
+ * 导出它是为了让「自动排查」能拿到**跟真实请求一模一样**的那份消息去二分 ——
+ * 排查用的如果是另一份，查出来的结论就跟实际发生的事无关。
+ */
+export function buildWire(history: ChatMessage[], cfg: GenerationConfig): WireMessage[] {
+  return toWire(history, cfg, cfg.toolsEnabled && cfg.enabledTools.length > 0, '');
+}
+
+/** 最近一次组装时修掉的结构问题，只用于展示 */
+let lastWireProblems: WireProblem[] = [];
+
+export function takeWireProblems(): WireProblem[] {
+  return lastWireProblems;
 }
 
 /* ------------------------------------------------------------------ *
@@ -392,13 +431,14 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
                 .join('\n'),
             )
           : null;
-        let body = buildRequestBody(
-          cfg,
-          toWire(working, cfg, toolNames.length > 0, args.extraSystem),
-          toolNames,
-          args.effortMappings,
-          roomLeft,
-        );
+        const wire = toWire(working, cfg, toolNames.length > 0, args.extraSystem);
+        const wireFixed = takeWireProblems();
+        if (wireFixed.length) {
+          // 这不是错误 —— 是「本来会 400，已经替你修好了」。说一声是为了
+          // 让人知道上下文被动过，不然下一轮模型「忘了」某一步会很费解
+          events.onNotice(`修正了历史结构：${describeWire(wireFixed)}`);
+        }
+        let body = buildRequestBody(cfg, wire, toolNames, args.effortMappings, roomLeft);
 
         let roundContent = '';
         let roundReasoning = '';
@@ -435,6 +475,9 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               // 配额是按凭据算的，不是按地址 —— 同一把 key 在别的会话里也在跑时，
               // 按地址分组会各记各的，两边都以为自己还有余量
               paceKey: args.profile.id,
+              // 这条路由 + 这个模型撞出来的上限，直接当本次的最小间隔。
+              // 学到的东西不用，等于每次重启都要把限流重新撞一遍
+              paceMinMs: pacingFloor(args.limitOf?.(), estimateTokens(JSON.stringify(body))),
             },
             {
               onPaceWait(ms) {
@@ -495,6 +538,25 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
            * 这里是整个改动的重点。之前 22 步的检索结果会随着这一个 400 一起
            * 作废，用户得从头再问一遍；现在只是中间那截被折叠掉，任务接着跑。
            */
+          /*
+           * 限流也要学。窗口大小是「一次能塞多少」，限流是「多快能发一次」——
+           * 两件事，但都属于「这条路由的脾气」，都该记在同一个地方，
+           * 而不是每次重启从头再撞一遍。
+           *
+           * 很多网关的限流报错里一个数字都没有，所以除了 rpm/tpm，
+           * 还把 pacer 当前退到的那个间隔一起记下来 —— 那是实测出来的
+           * 「慢到这个程度就不撞了」，比任何文档数字都贴合实际。
+           */
+          if (isRateLimited(failMsg, failStatus)) {
+            const nums = parseRateLimits(failMsg);
+            args.onLearnLimit?.({
+              ...nums,
+              minIntervalMs: paceOf(args.profile.id).intervalMs,
+              at: Date.now(),
+              from: failMsg.slice(0, 300),
+            });
+          }
+
           if (looksLikeOverflow(failMsg) || failStatus === 413) {
             const learned = parseLimits(failMsg);
             if (learned.maxContext || learned.maxOutput) {
@@ -746,6 +808,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               // 配额是按凭据算的，不是按地址 —— 同一把 key 在别的会话里也在跑时，
               // 按地址分组会各记各的，两边都以为自己还有余量
               paceKey: args.profile.id,
+              paceMinMs: pacingFloor(args.limitOf?.(), estimateTokens(JSON.stringify(finalBody))),
             },
             {
               onPaceWait: (ms) =>

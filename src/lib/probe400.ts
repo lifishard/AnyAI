@@ -1,7 +1,10 @@
 import type { GenerationConfig } from '../types';
 import { buildRequestBody } from './paramSchema';
 import type { EffortMapping } from './effort';
-import { isRateLimited } from './pacer';
+import { isRateLimited, isTokenLimit, spacingForTokens } from './pacer';
+import { checkWire } from './wirecheck';
+import { estimateTokens } from './limits';
+import type { WireMessage } from './paramSchema';
 
 /* ------------------------------------------------------------------ *
  * 400 自动排查
@@ -75,13 +78,21 @@ export const PROBE_SPACING_MS = 3000;
 /** 确认那一次等更久：短时突发到这会儿早该过去了 */
 const CONFIRM_WAIT_MS = 20_000;
 
+/** 撞到 TPM 时得等满一个窗口 —— 20 秒起不到作用，只是白撞一次 */
+const TOKEN_WINDOW_MS = 65_000;
+
 function guarded(send: Sender, onNote?: (s: string) => void): Sender {
   return async (body) => {
     const r = await send(body);
     if (r.ok || !isRateLimited(r.error ?? '', r.status)) return r;
 
-    onNote?.(`收到限流，${CONFIRM_WAIT_MS / 1000} 秒后确认一次是不是真的用尽了…`);
-    await new Promise((res) => setTimeout(res, CONFIRM_WAIT_MS));
+    // TPM 和 RPM 是两条线。撞 TPM 要等满一分钟窗口，按 20 秒等回去只会再撞一次
+    const wait = isTokenLimit(r.error ?? '') ? TOKEN_WINDOW_MS : CONFIRM_WAIT_MS;
+    onNote?.(
+      `收到限流（${isTokenLimit(r.error ?? '') ? '每分钟 token 上限' : '每分钟请求数上限'}），` +
+        `${Math.round(wait / 1000)} 秒后再确认一次…`,
+    );
+    await new Promise((res) => setTimeout(res, wait));
 
     const again = await send(body);
     if (again.ok || !isRateLimited(again.error ?? '', again.status)) return again;
@@ -306,4 +317,110 @@ function describeFix(label: string): string {
   if (label.includes('思考强度')) return '把输入框右下角的思考强度调成「不下发」。';
   if (label.includes('customBody')) return '清空配置面板最下面的「附加请求字段」。';
   return '';
+}
+
+
+/* ------------------------------------------------------------------ *
+ * 历史消息二分
+ *
+ * 字段全绿、真实对话还是 400 —— 这种时候锅在 messages 数组里，而上游只会
+ * 说一句 "inference request is invalid"，不告诉你是第几条。
+ *
+ * 做法是找**最短的会失败的前缀**：二分 k，发 messages[0..k]，失败就往左收。
+ * 找到的那个 k 就是「加上它就坏」的那一条。
+ *
+ * 一个关键细节：每个前缀都要先过 checkWire。直接切一刀几乎必然切出孤儿
+ * tool 消息，那样每个前缀都失败，二分会收敛到 k=1 并冤枉第一条消息。
+ * 换句话说，**没有结构修复就没法做历史二分**。
+ * ------------------------------------------------------------------ */
+
+export interface HistoryProbe {
+  steps: ProbeStep[];
+  /** 会失败的最短前缀的最后一条消息下标；null = 整段历史都没问题 */
+  badIndex: number | null;
+  verdict: string;
+}
+
+export async function probeHistory(
+  model: string,
+  messages: WireMessage[],
+  send: Sender,
+  onProgress?: (steps: ProbeStep[], note?: string) => void,
+): Promise<HistoryProbe> {
+  const steps: ProbeStep[] = [];
+  const guard = guarded(send, (note) => onProgress?.(steps, note));
+
+  /*
+   * 这一阶段每次要把大半段历史原样发出去，一次上万 token —— 跟字段阶段
+   * 那种「一条 hi」完全不是一个量级。用同样的 3 秒间隔，六次就能把 TPM
+   * 撞穿，而撞穿之后这个工具给出的结论又是错的（把自己造成的限流
+   * 当成配额用尽）。
+   *
+   * 所以间隔要按**实际发送量**算：发多少 token，就等够这些 token 在
+   * TPM 窗口里应占的时间。慢，但这正是「设计成不可能触发限流」的代价 ——
+   * 也是这个结论能作数的前提。
+   */
+  const totalTokens = estimateTokens(JSON.stringify(messages));
+  const perCall = spacingForTokens(totalTokens);
+  let last = 0;
+
+  const tryPrefix = async (k: number) => {
+    const slice = checkWire(messages.slice(0, k)).messages;
+    const gap = perCall - (Date.now() - last);
+    if (last && gap > 0) {
+      onProgress?.(steps, `为避开每分钟 token 上限，${Math.ceil(gap / 1000)} 秒后发下一次…`);
+      await new Promise((res) => setTimeout(res, gap));
+    }
+    last = Date.now();
+    const r = await guard({ model, messages: slice, max_tokens: 1 });
+    steps.push({ label: `前 ${k} 条消息`, ok: r.ok, error: r.error });
+    onProgress?.(steps);
+    return r.ok;
+  };
+
+  try {
+    if (await tryPrefix(messages.length)) {
+      return {
+        steps,
+        badIndex: null,
+        verdict:
+          '把整段历史原样发过去反而通过了 —— 说明那次 400 不在消息内容上，' +
+          '更可能是当时的结构问题（孤儿工具结果之类），而这个现在已经会自动修掉了。',
+      };
+    }
+
+    let lo = 1;
+    let hi = messages.length;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (await tryPrefix(mid)) lo = mid + 1;
+      else hi = mid;
+    }
+    const bad = messages[lo - 1];
+    const role = bad?.role ?? '?';
+    const size = typeof bad?.content === 'string' ? bad.content.length : JSON.stringify(bad?.content ?? '').length;
+    return {
+      steps,
+      badIndex: lo - 1,
+      verdict:
+        `第 ${lo} 条消息（role=${role}，正文 ${size} 字符）加进去就 400。` +
+        '常见原因：这条带了图片而模型是纯文本的、正文超长、或者它是一条上游不接受的空 assistant。',
+    };
+  } catch (e) {
+    if (e instanceof QuotaExhausted) {
+      const tokenSide = isTokenLimit(e.message);
+      return {
+        steps,
+        badIndex: null,
+        verdict: tokenSide
+          ? '查到一半撞上了**每分钟 token 上限**，这次不下结论。\n' +
+            '这一阶段每次都要把大半段历史原样发出去（一次上万 token），' +
+            '所以它比字段阶段吃 token 得多。等一两分钟额度回来再点一次；' +
+            '或者先从这条对话分叉出一条短的再查 —— 历史短了，这一步也就轻了。\n' +
+            `上游原话：${e.message}`
+          : `查到一半配额用尽了，这次不下结论。上游原话：${e.message}`,
+      };
+    }
+    throw e;
+  }
 }

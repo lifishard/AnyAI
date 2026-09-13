@@ -17,6 +17,18 @@
 export interface LearnedLimit {
   /** 总窗口（输入 + 输出） */
   maxContext?: number;
+  /** 每分钟请求数上限（撞出来的，或者从报错原文里读到的） */
+  rpm?: number;
+  /** 每分钟 token 上限 */
+  tpm?: number;
+  /**
+   * 这条路由实际跑得稳的最小发送间隔。
+   *
+   * 它比 rpm/tpm 更实用：很多网关根本不在报错里写数字，只说「太快了」。
+   * 那就不猜数字，只记「慢到多少就不再撞」——  撞一次翻倍，稳一阵回收，
+   * 存下来下次直接从这个节奏起步，而不是每次重启都重新撞一遍。
+   */
+  minIntervalMs?: number;
   /** 单次输出上限 */
   maxOutput?: number;
   /** 什么时候学到的 */
@@ -138,4 +150,83 @@ export function estimateTokens(text: string): number {
   // 按 1.6 估会系统性低估三成，而低估正是这里最不该犯的错）
   const perToken = Math.max(1, 4 - 3 * ratio);
   return Math.ceil(text.length / perToken);
+}
+
+
+/* ------------------------------------------------------------------ *
+ * 限流上限也照着学
+ *
+ * 跟窗口大小同一个思路：不内置对照表，撞到了就记住，下次从记住的节奏起步。
+ * 区别是限流的报错里**经常一个数字都没有**（「rpm exhausted」「太快了」），
+ * 所以除了数字，还要记「慢到多少就不撞了」这个经验值。
+ * ------------------------------------------------------------------ */
+
+/** 从报错原文里读出明确写着的 rpm / tpm */
+export function parseRateLimits(msg: string): { rpm?: number; tpm?: number } {
+  const out: { rpm?: number; tpm?: number } = {};
+  if (!msg) return out;
+
+  // 中英文的语序是反的：英文「100 requests per minute」，中文「每分钟最多 100 次」。
+  // 只写一种的话另一种永远读不出来 —— 第一版就漏了中文这条
+  const rpm =
+    msg.match(/(\d[\d,_]*)\s*(?:requests?|次|请求)[^.\d]{0,12}(?:per|\/|每)\s*(?:min|minute|分钟)/i) ??
+    msg.match(/每\s*分钟[^\d]{0,10}(\d[\d,_]*)\s*(?:次|请求)/) ??
+    msg.match(/rpm[^\d]{0,12}(\d[\d,_]*)/i);
+  if (rpm) {
+    const n = Number(rpm[1].replace(/[,_]/g, ''));
+    if (Number.isFinite(n) && n > 0) out.rpm = n;
+  }
+
+  const tpm =
+    msg.match(/(\d[\d,_]*)\s*tokens?[^.\d]{0,12}(?:per|\/|每)\s*(?:min|minute|分钟)/i) ??
+    msg.match(/每\s*分钟[^\d]{0,10}(\d[\d,_]*)\s*token/i) ??
+    msg.match(/tpm[^\d]{0,12}(\d[\d,_]*)/i);
+  if (tpm) {
+    const n = Number(tpm[1].replace(/[,_]/g, ''));
+    if (Number.isFinite(n) && n > 0) out.tpm = n;
+  }
+  return out;
+}
+
+/**
+ * 这条路由下发这么多 token 时，两次之间至少该隔多久。
+ *
+ * 三个来源取最严的那个：
+ *   - 记下来的经验间隔（撞出来的，最可信）
+ *   - rpm 换算成的间隔
+ *   - tpm 按本次发送量换算成的间隔
+ */
+export function pacingFloor(
+  limit: LearnedLimit | undefined,
+  tokens: number,
+  now = Date.now(),
+): number {
+  if (!limit) return 0;
+
+  /*
+   * 经验间隔要随时间衰减：每过一天减半。
+   *
+   * 不衰减的话，某一分钟的一次拥堵会把这条路由**永久**钉在慢速上 ——
+   * 而限流大多是一阵一阵的（别人也在用、促销时段、临时降配）。
+   * 数字型的 rpm/tpm 是上游明说的，不衰减；「我实测出来的经验值」
+   * 才需要一个忘记的机制。
+   */
+  const ageDays = Math.max(0, (now - (limit.at || now)) / 86_400_000);
+  const decayed = (limit.minIntervalMs ?? 0) / 2 ** ageDays;
+  const fromInterval = decayed < 50 ? 0 : Math.round(decayed);
+
+  const fromRpm = limit.rpm ? Math.ceil(60_000 / limit.rpm) : 0;
+  const fromTpm = limit.tpm && tokens > 0 ? Math.ceil((tokens / limit.tpm) * 60_000) : 0;
+  return Math.max(fromInterval, fromRpm, fromTpm);
+}
+
+/** 给设置界面用的一句话 */
+export function describeLimit(l: LearnedLimit | undefined): string {
+  if (!l) return '还没撞过，没有记录';
+  const bits: string[] = [];
+  if (l.maxContext) bits.push(`窗口 ${l.maxContext} token`);
+  if (l.rpm) bits.push(`${l.rpm} 次/分`);
+  if (l.tpm) bits.push(`${l.tpm} token/分`);
+  if (l.minIntervalMs) bits.push(`稳定间隔 ${l.minIntervalMs}ms`);
+  return bits.length ? bits.join('、') : '有记录但没有具体数字';
 }

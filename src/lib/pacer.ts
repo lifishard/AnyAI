@@ -166,3 +166,33 @@ export function describePace(key: string): string {
   if (!s.hits) return `发送间隔 ${s.intervalMs}ms（没撞过限流）`;
   return `发送间隔 ${s.intervalMs}ms —— 撞过 ${s.hits} 次限流，已自动放慢；一路顺利会慢慢收回去`;
 }
+
+
+/* ------------------------------------------------------------------ *
+ * 按 token 算的节奏
+ *
+ * RPM（每分钟请求数）和 TPM（每分钟 token 数）是两条独立的线，撞哪条都叫限流。
+ * 只按请求数排队，对付 RPM 够了，对付 TPM 完全没用 —— 一条 10K token 的请求
+ * 顶得上一百条 hi。
+ *
+ * 这是被自己打脸打出来的：排查工具的字段阶段每次只发一个 hi，3 秒一次绰绰有余；
+ * 到了历史阶段每次发一万多 token，同样 3 秒一次，六次就把 TPM 撞穿了。
+ * 「设计成不可能触发限流」这条原则，必须按**实际发出去的量**来算才成立。
+ * ------------------------------------------------------------------ */
+
+/**
+ * 不知道真实 TPM 时的保守假设。
+ * 宁可偏小：估小了只是慢一点，估大了就会撞线 —— 而撞线正是要避免的那件事。
+ */
+export const ASSUMED_TPM = 20_000;
+
+/** 发这么多 token，两次之间至少要隔多久才不会碰到 TPM */
+export function spacingForTokens(tokens: number, tpm = ASSUMED_TPM): number {
+  if (tokens <= 0 || tpm <= 0) return 0;
+  return Math.ceil((tokens / tpm) * 60_000);
+}
+
+/** 撞的是 token 那条线还是请求数那条线 —— 两者该等的时长差一个数量级 */
+export function isTokenLimit(msg: string): boolean {
+  return /tpm|token.{0,16}(per|\/)\s*min|每分钟.{0,8}token|token.{0,8}限制/i.test(msg || '');
+}

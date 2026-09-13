@@ -16,10 +16,10 @@ import type {
   ToolStep,
 } from './types';
 import { SEED_MODELS, buildHeaders, endpoint, fetchModels, previewBody } from './lib/api';
-import { PROBE_SPACING_MS, probe400, type ProbeStep } from './lib/probe400';
+import { PROBE_SPACING_MS, probe400, probeHistory, type ProbeStep } from './lib/probe400';
 import { formatExchange } from './lib/wiretap';
 import { limitKey } from './lib/limits';
-import { runAgent, type AgentHandle } from './lib/agent';
+import { buildWire, runAgent, type AgentHandle } from './lib/agent';
 import {
   clearHealth,
   mergeProbe,
@@ -757,6 +757,21 @@ export default function App() {
       const rep = await probe400(cfg, names, settings.effortMappings, send, (steps, note) =>
         render(steps, '正在排查…', note),
       );
+
+      /*
+       * 字段全绿但真实对话仍然失败时，锅在历史消息里 —— 接着二分它。
+       * 上一版到这里就只能耸耸肩说「可能是历史里有什么」，那不叫结论。
+       */
+      let historyPart = '';
+      const wire = active ? buildWire(active.messages, cfg) : [];
+      if (!rep.badTools && wire.length > 2) {
+        render(rep.steps, '字段都没问题，接着查历史消息…');
+        const h = await probeHistory(cfg.model, wire, send);
+        historyPart = ['', '—— 历史消息 ——', h.verdict, ...h.steps.map((st) => `${st.ok ? '✓' : '✗'} ${st.label}`)].join(
+          '\n',
+        );
+      }
+
       setPreview(
         [
           '排查结论',
@@ -765,6 +780,7 @@ export default function App() {
           '',
           '—— 每一步 ——',
           ...rep.steps.map((st) => `${st.ok ? '✓' : '✗'} ${st.label}${st.error ? `\n     ${st.error}` : ''}`),
+          historyPart,
         ].join('\n'),
       );
     } catch (e) {
