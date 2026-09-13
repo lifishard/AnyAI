@@ -149,6 +149,31 @@ function harness(chat,extra={}) {
 }
 function response(h,text,calls=[]) { h.onContent(text);h.onToolCalls(calls);h.onStop({reason:calls.length?'tool_calls':'stop',droppedCalls:0});h.onUsage({prompt_tokens:100,completion_tokens:50,total_tokens:150});h.onDone(); }
 
+test('Chat to Work keeps decisions, attachments and saved context while enabling tools only for the new turn', async () => {
+  const relay=load(file('src/lib/handoff.ts'));
+  const question={id:'discuss',role:'user',content:'先讨论发布方案，名称保留灯芯AI。',createdAt:1,
+    attachments:[{id:'brief',kind:'text',name:'brief.txt',text:'附件约束：仅向已报名用户发布。',mime:'text/plain',size:40}]};
+  const chatConfig={...cfg(),toolsEnabled:false,enabledTools:['read_file']};
+  const chat=harness(async(init,e)=>{
+    assert.ok(!init.body.tools?.length);
+    response(e,'决定：使用精简中文，发布时间为周五。');
+  },{history:[question],config:chatConfig});
+  await chat.finished;assert.equal(chat.log.done,1);
+  const answer={id:'chat-answer',role:'assistant',content:'决定：使用精简中文，发布时间为周五。',createdAt:2,taskId:'chat-run'};
+  const history=[question,answer,{id:'execute',role:'user',content:'按上面的方案检查资料并继续执行。',createdAt:3}];
+  const record={id:'chat-run',answerId:answer.id,question,config:chatConfig,state:chat.log.states.at(-1)};
+  const work=harness(async(init,e)=>{
+    const wire=JSON.stringify(init.body.messages);
+    for(const text of ['名称保留灯芯AI','仅向已报名用户发布','发布时间为周五','按上面的方案检查资料'])assert.ok(wire.includes(text),text);
+    assert.ok(init.body.tools.some(t=>t.function.name==='read_file'));
+    response(e,'已按已有方案继续处理。');
+  },{history,conversationMemory:relay.conversationMemory(history,()=>record),config:{...chatConfig,toolsEnabled:true}});
+  await work.finished;assert.equal(work.log.done,1);
+  assert.equal(work.log.states.at(-1).handoff.mode,'followup');
+  assert.equal(chatConfig.toolsEnabled,false);
+  assert.equal(history[0].attachments[0].text,'附件约束：仅向已报名用户发布。');
+});
+
 test('agent performs same-route compaction, accounts its usage and keeps unfinished milestones from ending a task', async () => {
   const state=longState();state.milestones=[];
   const h=harness(async(init,e)=>{

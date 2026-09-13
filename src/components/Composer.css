@@ -1,41 +1,25 @@
 .composer-mode-switch {
   display: inline-flex;
-  align-items: stretch;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
   border: 1px solid var(--border);
   border-radius: 999px;
-  overflow: hidden;
   background: var(--bg);
+  flex-shrink: 0;
 }
-
 .composer-mode-switch .mode-switch-btn {
-  border: none;
-  border-radius: 0;
-  padding-left: 10px;
-  padding-right: 10px;
+  border: 0;
+  border-radius: 999px;
+  padding: 3px 12px;
+  min-width: 48px;
+  justify-content: center;
 }
-
-.composer-mode-switch .mode-switch-btn + .mode-switch-btn {
-  border-left: 1px solid var(--border);
-}
-
 .composer-mode-switch .mode-switch-btn.selected {
   background: var(--accent);
   color: var(--accent-fg);
-  border-color: var(--accent);
 }
-
 .composer-mode-switch .mode-switch-btn:focus-visible {
-  outline: 2px solid var(--fg);
-  outline-offset: -4px;
-}
-
-@media (max-width: 860px) {
-  .composer-mode-switch {
-    width: auto;
-  }
-
-  .composer-mode-switch .mode-switch-btn {
-    flex: 1 1 auto;
-    justify-content: center;
-  }
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

@@ -71,6 +71,7 @@ import Composer from './components/Composer';
 import ConfigPanel from './components/ConfigPanel';
 import SettingsDialog from './components/SettingsDialog';
 import Sidebar from './components/Sidebar';
+import WorkspaceHeader from './components/WorkspaceHeader';
 import ArtifactPanel from './components/ArtifactPanel';
 import Resizer from './components/Resizer';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -157,6 +158,7 @@ export default function App() {
   const [openArtifact, setOpenArtifact] = React.useState<Artifact | null>(null);
   const [sidebarHidden, setSidebarHidden] = React.useState(false);
   const [sidebarW, setSidebarW] = React.useState(268);
+  const [teamSidebar, setTeamSidebar] = React.useState<HTMLDivElement | null>(null);
   const [panelW, setPanelW] = React.useState(420);
   const [workspaceOpen, setWorkspaceOpen] = React.useState(false);
   const [workspaceTab, setWorkspaceTab] = React.useState<string>('projects');
@@ -1286,8 +1288,16 @@ export default function App() {
       disabled={false}
       sendKey={settings.sendKey}
       sendMode={config.toolsEnabled ? "work" : "chat"}
-      onSendMode={(mode) => { setConfig({ toolsEnabled: mode === "work" }); if (mode === "chat" && busy) { busy.handle.abort(); toast.show("已停止后续工具调度，正在保存当前检查点", 5000); } }}
-      onSend={(t) => void send(t)}
+      onSendMode={(mode) => {
+        setConfig({ toolsEnabled: mode === 'work' });
+        if (mode === 'chat' && busy) {
+          busy.handle.abort();
+          toast.show('已停止后续工具调度，正在保存当前检查点', 5000);
+        } else if (mode === 'work' && active?.messages.length) {
+          toast.show(busy ? '当前回复会继续完成；下一条消息将带上已有对话，由 Work 接着处理' : '已切换为 Work，已有对话和附件会继续作为上下文');
+        }
+      }}
+      onSend={(t, mode) => void send(t, undefined, undefined, {toolsEnabled: mode === 'work', text: t, attachments: [...attachments], quotes: [...quotes], quoteOnly, conversationId: active?.id ?? null})}
       onStop={stop}
       stream={config.stream}
       toolCount={toolNames.length}
@@ -1348,16 +1358,24 @@ export default function App() {
 
   return (
     <div className="app">
-      {!sidebarHidden && !teamVisible ? (
+      {!sidebarHidden ? (
       <aside
         className={`sidebar${sidebarOpen ? ' open' : ''}`}
         style={{ width: sidebarW, flexBasis: sidebarW }}
       >
+        <WorkspaceHeader team={teamVisible} platform={platformLabel()} projects={projects}
+          projectId={teamVisible ? (settings.collaborationView?.projectId ?? activeProject?.id ?? projects[0]?.id ?? '') : (active?.projectId ?? '')}
+          onProject={id => {
+            if (teamVisible) setSettings(s => s ? {...s, collaborationView: {visible: true, projectId: id}} : s);
+            else if (active) moveToProject(active.id, id || null);
+            else if (id) newChat(id);
+          }}
+          onMode={setTeamVisible}
+          onHide={() => { setSidebarOpen(false); setSidebarHidden(true); }} />
+        <div className="sidebar-body" hidden={teamVisible}>
         <Sidebar
-          onHide={() => setSidebarHidden(true)}
           conversations={conversations}
           activeId={activeId}
-          platform={platformLabel()}
           onSelect={(id) => {
             setActiveId(id);
             setSidebarOpen(false);
@@ -1385,10 +1403,12 @@ export default function App() {
           }}
           onOpenObservations={()=>{setObservationsOpen(true);setSidebarOpen(false);}}
         />
+        </div>
+        <div className="sidebar-body" hidden={!teamVisible} ref={setTeamSidebar} />
       </aside>
       ) : null}
 
-      {!sidebarHidden && !teamVisible ? (
+      {!sidebarHidden ? (
         <Resizer
           side="left"
           width={sidebarW}
@@ -1409,12 +1429,11 @@ export default function App() {
         />
       )}
 
-      {teamVisible ? <div className="team-workspace-container"><React.Suspense fallback={<div className="empty">正在打开协作空间…</div>}><TeamWorkspace projects={projects} settings={settings} sourceConversation={active} beforeRestore={async()=>{stop();await teamRuntime.pauseAll();await saveConversationsNow(conversations);}} onProject={projectId=>setSettings(s=>s?{...s,collaborationView:{visible:true,projectId}}:s)} initialProjectId={settings.collaborationView?.projectId??activeProject?.id} onSingle={()=>setTeamVisible(false)} onSettings={()=>{setSettingsTab('keys');setSettingsOpen(true);}} onCreateProject={name=>{const p=makeProject(name);setProjects(all=>[...all,p]);return p.id;}} onHandoff={(text,projectId)=>{const conv=newConversation(settings.defaultConfig,settings.activeKeyProfileId);conv.projectId=projectId;conv.title=titleFrom(text);conv.messages=[{id:uid(),role:'user',content:text,createdAt:Date.now()}];setConversations(all=>[...all,conv]);setActiveId(conv.id);setTeamVisible(false);}}/></React.Suspense></div> : null}
+      {teamVisible ? <div className="team-workspace-container"><React.Suspense fallback={<div className="empty">正在打开协作空间…</div>}><TeamWorkspace sidebarTarget={teamSidebar} sidebarHidden={sidebarHidden} onOpenSidebar={()=>{setSidebarHidden(false);setSidebarOpen(true);}} onNavigate={()=>setSidebarOpen(false)} projects={projects} settings={settings} sourceConversation={active} beforeRestore={async()=>{stop();await teamRuntime.pauseAll();await saveConversationsNow(conversations);}} onProject={projectId=>setSettings(s=>s?{...s,collaborationView:{visible:true,projectId}}:s)} initialProjectId={settings.collaborationView?.projectId??activeProject?.id} onSingle={()=>setTeamVisible(false)} onSettings={()=>{setSettingsTab('keys');setSettingsOpen(true);}} onCreateProject={name=>{const p=makeProject(name);setProjects(all=>[...all,p]);return p.id;}} onHandoff={(text,projectId)=>{const conv=newConversation(settings.defaultConfig,settings.activeKeyProfileId);conv.projectId=projectId;conv.title=titleFrom(text);conv.messages=[{id:uid(),role:'user',content:text,createdAt:Date.now()}];setConversations(all=>[...all,conv]);setActiveId(conv.id);setTeamVisible(false);}}/></React.Suspense></div> : null}
       <main className="main" style={teamVisible?{display:'none'}:undefined}>
         {saveError ? <div className="grant-banner" role="alert">{saveError}<button className="btn sm" onClick={() => { void Promise.all([saveSettings(settings), saveConversationsNow(conversations),saveProjects(projects),saveSkills(skills),saveTasks(tasks)]).then(() => setSaveError(null)).catch(reportSaveError); }}>重试保存</button></div> : null}
         <div className="topbar">
-          <button className="btn sm team-view-toggle" onClick={()=>setTeamVisible(true)}>单一 Agent ⇄ 协作空间</button>
-          <button className="btn sm ghost only-narrow" onClick={() => setSidebarOpen(true)}>
+          <button className="btn sm ghost only-narrow" title="展开侧栏" onClick={() => { setSidebarHidden(false); setSidebarOpen(true); }}>
             ☰
           </button>
           {sidebarHidden ? (
@@ -1426,22 +1445,7 @@ export default function App() {
               ⇥
             </button>
           ) : null}
-          <span style={{ fontWeight: 600, fontSize: 13 }}>{active?.title ?? '新对话'}</span>
-          {active ? (
-            <select
-              className="topbar-project"
-              value={active.projectId ?? ''}
-              title="把这个对话归到某个项目里 —— 项目的规范、记忆和文档会自动带进来"
-              onChange={(e) => moveToProject(active.id, e.target.value || null)}
-            >
-              <option value="">不属于项目</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.emoji} {p.name}
-                </option>
-              ))}
-            </select>
-          ) : null}
+          <span className="page-title" title={active?.title}>{active?.title ?? '新对话'}</span>
           <span className="spacer" />
           {!profile ? <span className="chip warn">未配置凭据</span> : null}
           <span className="chip">{config.model || '未选模型'}</span>

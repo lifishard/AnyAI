@@ -5,7 +5,6 @@ import type { Project } from '../lib/projects';
 export default function Sidebar(props: {
   conversations: Conversation[];
   activeId: string | null;
-  platform: string;
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
@@ -14,7 +13,6 @@ export default function Sidebar(props: {
   onFork: (id: string) => void;
   onOpenSettings: () => void;
   onOpenObservations: () => void;
-  onHide: () => void;
 
   projects: Project[];
   onNewInProject: (projectId: string | null) => void;
@@ -136,13 +134,6 @@ export default function Sidebar(props: {
   return (
     <>
       <div className="sidebar-head">
-        <div className="brand">
-          <button className="icon-btn brand-toggle" title="收起侧栏（Ctrl+B）" onClick={props.onHide}>
-            ⇤
-          </button>
-          <span title="wickrunAI">灯芯AI</span>
-          <small>{props.platform}</small>
-        </div>
         <button className="btn primary block" onClick={props.onNew}>
           ＋ 新对话
         </button>

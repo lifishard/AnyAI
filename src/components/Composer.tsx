@@ -503,7 +503,7 @@ export default function Composer(props: {
             {props.contextPreview ? <ContextMeter preview={props.contextPreview} draft={contextDraft} /> : null}
             {!props.stream ? <span className="chip">非流式</span> : null}
 
-            <div className="composer-mode-switch" role="group" aria-label="请求模式" title="Chat 不下发工具；Work 使用本次会话的工具配置">
+            <div className="composer-mode-switch" role="group" aria-label="请求模式" title="沿用同一段对话和附件；Chat 讨论，Work 接着执行。切换后对下一条消息生效。">
               <button
                 type="button"
                 aria-pressed={mode === 'chat'}
