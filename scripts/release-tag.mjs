@@ -8,7 +8,7 @@ export function releaseTag(root,version) {
   const refs=git(['ls-remote','--tags','origin',`refs/tags/${tag}`,`refs/tags/${tag}^{}`]).split('\n').filter(Boolean).map(l=>l.split(/\s+/));
   const remote=refs.find(r=>r[1].endsWith('^{}'))?.[0]??refs[0]?.[0];
   if((local&&local!==head)||(remote&&remote!==head))throw new Error(`${tag} 已指向其他提交。请更新版本号后发布，不能覆盖旧版本标签。`);
-  if(!local)git(['tag','-a',tag,'-m',`AnyAI ${version}`]);
+  if(!local)git(['tag','-a',tag,'-m',`wickrunAI ${version}`]);
   execFileSync('git',['push','origin',`refs/tags/${tag}`],{cwd:root,stdio:'inherit'});
   return {tag,head,alreadyPushed:Boolean(remote)};
 }

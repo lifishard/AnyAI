@@ -140,7 +140,7 @@ export default function Sidebar(props: {
           <button className="icon-btn brand-toggle" title="收起侧栏（Ctrl+B）" onClick={props.onHide}>
             ⇤
           </button>
-          <span>AnyAI</span>
+          <span title="wickrunAI">灯芯AI</span>
           <small>{props.platform}</small>
         </div>
         <button className="btn primary block" onClick={props.onNew}>

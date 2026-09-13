@@ -15,7 +15,7 @@ test('pre-push handles first filename, spaces and rename records without printin
 
 test('release retention keeps two newest usable versions, removes recognized legacy packages and protects other files',async t=>{
   const {retentionPlan,pruneReleases}=await moduleOf('release-retention.mjs');const root=sandbox(t);
-  for(const v of ['1.0.0','1.2.0','1.3.0','1.3.1']){const dir=path.join(root,v);fs.mkdirSync(dir);fs.writeFileSync(path.join(dir,`AnyAI-${v}-win-x64-setup.exe`),'fixture');}
+  for(const v of ['1.0.0','1.2.0','1.3.0','1.3.1']){const dir=path.join(root,v);fs.mkdirSync(dir);fs.writeFileSync(path.join(dir,`${v==='1.3.1'?'wickrunAI':'AnyAI'}-${v}-win-x64-setup.exe`),'fixture');}
   fs.writeFileSync(path.join(root,'SenseNova Chat-1.0.0-x64.exe'),'fixture');
   fs.writeFileSync(path.join(root,'AnyAI-1.0.0-x64.exe.blockmap'),'fixture');
   fs.writeFileSync(path.join(root,'notes.txt'),'KEEP');fs.mkdirSync(path.join(root,'9.0.0'));fs.writeFileSync(path.join(root,'9.0.0','incomplete.txt'),'KEEP');

@@ -38,7 +38,7 @@ export default function ObservationPanel({onClose,onOpenTask}:{onClose:()=>void;
   const save=async()=>{
     if(!preview)return;setBusy(true);setError('');
     try{
-      const bytes=zipTextFiles(preview),name=`AnyAI-${preview['diagnostic.json']?'task-diagnostic':'usage-analysis'}-${new Date().toISOString().slice(0,10)}.zip`;
+      const bytes=zipTextFiles(preview),name=`wickrunAI-${preview['diagnostic.json']?'task-diagnostic':'usage-analysis'}-${new Date().toISOString().slice(0,10)}.zip`;
       const bridge=desktop();
       if(bridge?.saveAnalysisExport){const file=await bridge.saveAnalysisExport(name,bytes);if(file)setSaved(file.path);}
       else{const url=URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer],{type:'application/zip'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);setSaved('已交给浏览器下载，可将导出包交给助手分析。');}

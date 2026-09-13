@@ -8,8 +8,8 @@
   跨平台产物交给 GitHub Actions，见下。
 
 ```bash
-git clone https://github.com/lifishard/AnyAI.git
-cd anyai
+git clone https://github.com/lifishard/wickrunAI.git
+cd wickrunAI
 npm install
 ```
 
@@ -38,7 +38,7 @@ Windows 上双击 **`打包桌面版.bat`** 是同一件事的无命令行版本
 
 | 文件 | 说明 |
 |---|---|
-| `AnyAI-<当前版本>-win-x64-setup.exe` | NSIS 安装版，自动建桌面和开始菜单快捷方式 |
+| `wickrunAI-<当前版本>-win-x64-setup.exe` | NSIS 安装版，自动建桌面和开始菜单快捷方式 |
 | 带 `portable` 的那个 | 免安装，扔哪都能双击跑 |
 
 **类型检查失败会停止打包。** 新包成功生成后，保留最新和前一个有可用包的版本，清理 release 内更老的已识别安装包、blockmap 和对应版本目录，兼容历史 SenseNova Chat 包。构建失败不清理；仍在运行的旧产物暂留。未知文件、没有可用包的目录及目录链接不删除。
@@ -80,7 +80,7 @@ electron-builder 要解压一个叫 winCodeSign 的签名工具包，里面混�
 
 ### 2. `output file is locked for writing`
 
-**旧的 AnyAI 还开着。** 关掉再打。
+**旧的 wickrunAI 还开着。** 关掉再打。
 `scripts/build-desktop.mjs` 会先用 `tasklist` 检测，问你要不要 `taskkill`。
 
 ## Android
@@ -107,7 +107,7 @@ npx cap open android       # 用 Android Studio 打开，Build → APK
 
 ```bash
 node scripts/init-repo.mjs <owner> [repo]
-# 例：node scripts/init-repo.mjs octocat anyai
+# 例：node scripts/init-repo.mjs octocat wickrunAI
 ```
 
 脚本匹配的是当前仓库的 `owner/repo` 字样，改完自检一下
@@ -118,7 +118,7 @@ node scripts/init-repo.mjs <owner> [repo]
 ```bash
 git init
 git add -A
-git commit -m "AnyAI 1.0.0"
+git commit -m "wickrunAI 1.0.0"
 git branch -M main
 git remote add origin https://github.com/<owner>/<repo>.git
 git push -u origin main
@@ -160,7 +160,7 @@ Release 还包含 `SHA256SUMS.txt` 和 `release-manifest.json`，记录文件大
 
 后果：Windows SmartScreen 和 macOS Gatekeeper 会警告「未知发布者」/「已损坏」。
 这是没有证书时的预期行为。macOS 用户绕过的方法是右键 → 打开，
-或者 `xattr -dr com.apple.quarantine /Applications/AnyAI.app`。
+或者 `xattr -dr com.apple.quarantine /Applications/wickrunAI.app`。
 
 要签名的话：Windows 需要一张 OV/EV 代码签名证书（一年几百刀），
 macOS 需要 Apple Developer Program（$99/年）。把证书放进仓库 secrets，

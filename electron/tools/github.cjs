@@ -50,7 +50,7 @@ function headers(token, raw) {
     // raw 模式直接拿文件原文：不走 base64、不裹 JSON，省掉一整类体积问题
     Accept: raw ? 'application/vnd.github.raw' : 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
-    'User-Agent': 'AnyAI',
+    'User-Agent': 'wickrunAI',
   };
   if (token) h.Authorization = `Bearer ${token}`;
   return h;
@@ -151,7 +151,7 @@ async function githubApi(args, ctx, secrets) {
     const cdnUrl = toCdnUrl(p);
     if (cdnUrl) {
       try {
-        const res = await fetchWithTimeout(cdnUrl, { headers: { 'User-Agent': 'AnyAI' } }, ctx.toolTimeoutMs);
+        const res = await fetchWithTimeout(cdnUrl, { headers: { 'User-Agent': 'wickrunAI' } }, ctx.toolTimeoutMs);
         if (res.ok) {
           const text = await res.text();
           const LIMIT = 400000;

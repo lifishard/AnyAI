@@ -3,7 +3,7 @@ import { bodyHash, makeSkill, normalizeBody, parseSkillMd, toSkillMd, type Skill
 /* ------------------------------------------------------------------ *
  * 技能与本地文件夹的双向同步
  *
- * 目标是让 AnyAI 和 Claude Code / Desktop 共用同一份技能 —— 后者读的就是
+ * 目标是让 wickrunAI 和 Claude Code / Desktop 共用同一份技能 —— 后者读的就是
  * ~/.claude/skills/<名字>/SKILL.md。
  *
  * ── 怎么判断该往哪个方向同步 ──

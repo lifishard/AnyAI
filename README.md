@@ -1,174 +1,103 @@
 <div align="center">
 
-<img src="build/icon.png" width="96" alt="AnyAI">
+<img src="build/icon.png" width="96" alt="灯芯AI">
 
-# AnyAI
+# wickrunAI · 灯芯AI
 
-**BYOK 多模型 Agent 客户端 · 桌面 / Android**
+用自己的 API Key，在同一个任务里切换模型、继续工作。
 
-**同一个窗口、同一份任务记录，多模型接力完成工作。** 上下文、总结记忆、执行证据和待办由应用保存；切换模型后继续承接，按新模型的窗口重新计算预算。
-
-用**你自己的** API Key，本应用不提供也不代管任何 Key。
-
-任何 OpenAI 兼容的端点都能接 —— 日日新、Kimi、DeepSeek、自建聚合网关。
-不是聊天壳子：它会联网查证、读写本地文件、控制 Chrome、调 GitHub API，
-也能把整件编码活儿转包给本机的 Claude Code。
-
-[![CI](https://github.com/lifishard/AnyAI/actions/workflows/ci.yml/badge.svg)](https://github.com/lifishard/AnyAI/actions/workflows/ci.yml)
+[![CI](https://github.com/lifishard/wickrunAI/actions/workflows/ci.yml/badge.svg)](https://github.com/lifishard/wickrunAI/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-[下载](#安装) · [配置说明](docs/CONFIGURATION.md) · [从源码构建](docs/BUILD.md) · [架构](docs/ARCHITECTURE.md) · [安全](SECURITY.md)
+[下载](https://github.com/lifishard/wickrunAI/releases) · [配置说明](docs/CONFIGURATION.md) · [构建方法](docs/BUILD.md) · [安全说明](SECURITY.md)
 
 </div>
 
----
+灯芯AI 是一个开源 AI 客户端，支持 Windows、macOS 和 Linux。你可以连接采用 OpenAI 兼容接口的模型，用它查资料、处理文档、读写文件，也可以授权它操作 Chrome 或调用本机的 Claude Code。
 
-> **English** — AnyAI is a bring-your-own-key desktop (Electron) and Android (Capacitor)
-> client for any OpenAI-compatible endpoint. It runs a real function-calling agent loop:
-> web search with citations, local file read/write, shell, Chrome control over CDP,
-> GitHub API, and delegation to a locally installed Claude Code CLI. Models, credentials,
-> reasoning effort, sampling parameters and the enabled tool set are all configured in the
-> UI — nothing is hardcoded. Docs are in Chinese; the UI is in Chinese.
-> **It can execute commands and write files on your machine — read [SECURITY.md](SECURITY.md) first.**
+做长任务时，你可以先让一个模型搜集资料，暂停后换另一个模型整理或检查。灯芯AI 会保存你的要求、执行记录和原始资料；点击“接着跑”，新模型就能从保存的位置继续。你仍需要检查结果，特别是引用、计算和生成的文件。接力方式见 [模型接力说明](docs/MODEL_HANDOFF.md)。
 
----
+使用前需要准备模型服务商的 API Key。模型调用费用由服务商收取。项目另有 Android 客户端，可通过局域网连接电脑；目前尚未完成真机验证。
 
-## 它是什么
+## 可以做什么
 
-AnyAI 的核心是跨模型的任务连续性：模型负责推理与行动选择，应用负责保留用户要求、历史总结、原始证据和恢复位置。暂停后切换模型，再点“接着跑”可沿用原任务；同窗口继续提问也会承接交接记录，并允许按来源读取原文。接力状态表示上下文已准备或已发送，结果仍需验收。详见 [上下文与模型接力](docs/MODEL_HANDOFF.md)。
-
-一个 BYOK（Bring Your Own Key）客户端：Key 是你的，从你的账号出，只存在你这台机器上。
-应用不提供、不代理、不经手任何密钥 —— 它出的是界面和能力。
-
-**没有一处写死**：模型、凭据、思考强度、流式开关、采样参数、启用哪些工具，全部在界面上调。
-模型列表是从 `GET {base}/models` 拉的，上游上新模型不用等这个项目更新。
-
-界面是 Perplexity 那一套 —— 答案里带可点的来源编号，下面跟着这一轮调了哪些工具。
-
-## 能做什么
-
-| | |
+| 用途 | 使用方式 |
 |---|---|
-| 🔍 **联网查证** | Tavily / Brave / SearXNG 三选一，结果编号成可点来源 |
-| 📁 **读写本地文件** | 限定在你手动添加的工作目录内，路径守卫解引用符号链接 |
-| 📄 **文档读写** | pdf / docx / xlsx / csv → Markdown；Markdown → docx / pdf / xlsx / html |
-| 🌐 **控制 Chrome** | 通过 CDP 控制一个独立配置目录的实例，不碰你日常那份 |
-| 🐙 **GitHub** | 搜代码、读仓库、开 issue、装技能 |
-| 🤖 **Claude Code** | 本机装了就能把整件编码活儿转包出去 |
-| 💻 **命令行** | 工作目录内的 cwd，执行前确认 |
-| 📦 **产物面板** | 生成的文件和成品代码块在右侧预览，给路径、在文件夹中显示、用默认程序打开 |
-| 🗂 **项目** | 一组对话共享规范 / 记忆 / 文档 / 常用提示词 |
-| ⚡ **技能** | `/名字` 唤起，兼容 Anthropic 的 SKILL.md，能从 GitHub 直接装 |
-| ⏰ **定时任务** | 每隔 N 分钟 / 每天 / 每周 / cron，错过会补跑 |
-| 📱 **Android** | 手机端通过内网遥控复用电脑的本地能力 |
-| 🩺 **模型健康度** | 限流和瞬时 5xx 自动退避重试；坏掉的路由自动折叠出默认列表，可批量体检 |
+| 查资料 | 配置 Tavily、Brave 或 SearXNG，在回答中查看来源链接 |
+| 处理文件 | 添加工作目录后，让模型读取资料、生成文档或表格；在文件卡片中打开成品或查看保存位置 |
+| 继续长任务 | 暂停、重启应用或切换模型后，从保留的任务记录继续 |
+| 浏览器操作 | 启动专用的 Chrome 实例，登录需要使用的网站，再授权模型操作 |
+| 编码与仓库工作 | 读取 GitHub 仓库、搜索代码，或调用已安装的 Claude Code；按权限设置执行命令 |
+| 整理项目 | 为一组对话保存共用的说明、参考文档和常用提示词 |
+| 使用技能 | 导入 `SKILL.md` 技能，在对话中用 `/名字` 调用 |
+| 定时运行 | 设置间隔、每日、每周或 cron 任务；执行时需要相应设备和服务可用 |
+| 检查调用情况 | 查看模型连接、用量和失败记录；遇到限流时，按恢复策略等待并重试 |
 
-细节都在 [配置说明](docs/CONFIGURATION.md)。
+不同模型对工具调用、图片和思考参数的支持有差异。首次使用一个端点时，建议先测试连接，再试一个小任务。
 
 ## 安装
 
-### 下载现成的
-
-去 [Releases](https://github.com/lifishard/AnyAI/releases) 拿对应平台的包：
+从 [Releases](https://github.com/lifishard/wickrunAI/releases) 下载对应平台的文件。新版文件使用 `wickrunAI` 前缀；历史版本仍保留发布时的名称。
 
 | 平台 | 文件 |
 |---|---|
-| Windows | `AnyAI-x.y.z-win-x64-setup.exe`（安装版）或带 `portable` 的免安装版 |
-| macOS | `AnyAI-x.y.z-mac-arm64.dmg`（Apple Silicon）/ `-x64.dmg`（Intel） |
-| Linux | `AnyAI-x.y.z-linux-x64.AppImage` 或 `.deb` |
+| Windows 64 位 | `wickrunAI-x.y.z-win-x64-setup.exe`；免安装版为 `-portable.exe` |
+| macOS Apple Silicon | `wickrunAI-x.y.z-mac-arm64.dmg` |
+| macOS Intel | `wickrunAI-x.y.z-mac-x64.dmg` |
+| Linux 64 位 | `wickrunAI-x.y.z-linux-x64.AppImage` 或 `.deb` |
 
-**没有代码签名。** Windows SmartScreen 会拦一下（更多信息 → 仍要运行），
-macOS 要右键 → 打开，或者：
+当前安装包没有代码签名，Windows 或 macOS 可能显示发布者提示。下载后可使用 Release 中的 `SHA256SUMS.txt` 核对文件；也可以按下面的方法从源码构建。
+
+### 首次使用
+
+1. 打开“设置 → API 凭据”，添加 Base URL 和 API Key，点击“测试连接”。
+2. 在输入框旁选择模型，发送一个问题确认能收到回复。
+3. 需要处理本地文件时，在工具设置里添加工作目录。
+4. 需要联网搜索时，配置一个搜索服务。需要操作网站时，启动工具中的 Chrome 并登录网站。
+
+模型选择按会话保存。思考强度、工具权限和任务预算等选项见 [配置说明](docs/CONFIGURATION.md)。
+
+### 从旧版升级
+
+项目曾使用 SenseNova Chat 和 AnyAI 两个名称。从 AnyAI 升级时，灯芯AI 继续使用原来的数据目录，保留配置、会话、任务记录和工具浏览器的登录资料。目录仍叫 `AnyAI`，属于兼容安排。
+
+安装新版前请退出旧版。应用目前没有自动更新功能，请从 Releases 下载新版本。
+
+## 从源码构建
+
+需要 Node.js 20 或更新版本。
 
 ```bash
-xattr -dr com.apple.quarantine /Applications/AnyAI.app
-```
-
-这是没有证书的预期行为，不是包坏了。介意的话就从源码构建。
-
-### 从源码构建
-
-```bash
-git clone https://github.com/lifishard/AnyAI.git
-cd anyai
+git clone https://github.com/lifishard/wickrunAI.git
+cd wickrunAI
 npm install
-npm run dist:win      # 或 dist:mac / dist:linux
+npm run dist:win
 ```
 
-Windows 上不想开命令行：双击 `打包桌面版.bat`。
-维护者发布三平台安装包：双击 `发布三平台版本.bat`，通过 GitHub Actions 构建并发布；`同步到github.bat` 只同步源码。
-完整说明（含 Android、两个常见的 Windows 打包失败、发版流程）见 [docs/BUILD.md](docs/BUILD.md)。
+在 macOS 或 Linux 上，最后一步分别使用 `npm run dist:mac` 或 `npm run dist:linux`。Windows 用户也可以双击 `打包桌面版.bat`。
 
-## 五分钟跑起来
+维护者可用 `同步到github.bat` 提交源码，用 `发布三平台版本.bat` 触发 GitHub Actions 构建并发布安装包。发版流程和 Android 构建方法见 [构建说明](docs/BUILD.md)。
 
-1. **加一份 API 凭据** —— 设置 → API 凭据 → 添加。填 Base URL 和 Key，点「测试连接」把模型列表拉回来。
-2. **选模型** —— 输入框左下角。这个选择是**当前会话**的，不是全局的。
-3. **调思考强度** —— 输入框右下角，一档五级，各家 API 的字段差异由映射表翻译。
-4. **想联网**：设置 → 工具 → 搜索，填一个 Tavily / Brave 的 Key。
-5. **想让它碰文件**：设置 → 工具 → 工作目录，加一个目录。
-   **不加的话所有文件和命令行工具直接拒绝执行** —— 这是故意的默认值。
+## 权限与数据
 
-每一项的详细说明、取舍原因和疑难排查，全在 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。
+你可以按会话设置工具权限，并指定允许读写的工作目录。命令行和浏览器工具会对电脑或网站执行操作，授权前请核对任务和目标。
 
-## 安全
+桌面端会在系统支持时使用操作系统的加密存储保护 API Key。配置、会话和任务资料保存在本机；调用模型或工具时，相关内容会发送到你配置的服务。密钥存储、远程连接和权限限制见 [安全说明](SECURITY.md)。
 
-**这不是普通聊天应用，它能在你的机器上执行命令、读写文件、控制浏览器。**
+## 开发与反馈
 
-三道闸门：工作目录白名单（realpath 解引用）、执行前确认（每个会话独立，三档）、
-密钥走系统级加密存储且不进渲染进程。
+桌面端使用 Electron 34，界面使用 React 19、Vite 和 TypeScript；Android 端使用 Capacitor 7。开发资料见 [架构说明](docs/ARCHITECTURE.md) 和 [贡献指南](CONTRIBUTING.md)。
 
-同样重要的是**挡不住什么**：白名单内部的破坏、提示词注入。
-装之前请看完 [SECURITY.md](SECURITY.md)。
+源码版本为 1.3.3，已发布版本以 [Releases](https://github.com/lifishard/wickrunAI/releases) 为准。目前 Android 真机运行、部分服务商的思考参数映射仍需验证。图片附件需要支持图片输入的模型。
 
-## 怎么搭起来的
+遇到问题，请在 [Issues](https://github.com/lifishard/wickrunAI/issues) 中提供应用版本、系统、端点、模型 ID 和复现步骤。附上日志或请求预览前，请删除 API Key 和私人内容。
 
-```
-你输入问题
-   ↓
-Agent 循环 (src/lib/agent.ts)
-   ↓  把 tools schema 随请求下发
-模型返回 tool_calls
-   ↓  危险操作弹确认
-工具在原生层执行 (electron/tools/*)
-   ↓  结果回灌，编号成可引用来源
-再问一轮 … 直到模型给出终答
-```
+## English
 
-三个平台搬字节的方式不同，**但解析只有一份**（`src/lib/sse.ts`）：
+wickrunAI is an open-source desktop client for Windows, macOS, and Linux. Connect an OpenAI-compatible model service with your own API key to research topics, work with files, or use local tools.
 
-| | 网络请求走哪 | 工具在哪执行 |
-|---|---|---|
-| 桌面（Electron） | 主进程 `fetch` | 主进程，直接跑 |
-| Android（Capacitor） | 自写的 `SncHttp` 原生插件 | 转发到电脑 |
-| 浏览器（开发态） | Vite 代理插件 | 转发到电脑 |
+You can pause a task, switch models, and continue with the saved instructions, task history, and source material. Review the output before using it. Model providers charge for API usage; wickrunAI does not supply API keys. The interface and documentation are in Chinese. The Android client has not yet been tested on a physical device.
 
-技术栈：React 19 + Vite + TypeScript，Electron 34 桌面端，Capacitor 7 Android 端。
-详细设计（含 PDF 版面重建、思考强度映射、上下文压缩）见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+## License
 
-## 项目状态
-
-当前版本 1.3.2。以下能力仍有验证限制：
-
-- **Android 端完全没在真机上跑过。** 那个 Java 插件的流式读取（跨块的多字节 UTF-8）
-  是按原理写的，没验证
-- **思考强度映射表里标了「推测」的几条**（Kimi、日日新）按厂商惯例填的，
-  报 400 就改那一行，不用改代码
-- **图片附件要模型支持多模态**，纯文本模型收到图片会直接 400
-- **没有自动更新**，更新靠自己下新版本
-
-发现问题欢迎开 [issue](https://github.com/lifishard/AnyAI/issues)，
-带上端点、模型 ID 和请求体预览（记得去掉 Key）。参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 许可
-
-[Apache License 2.0](LICENSE)。
-
-选 Apache 而不是 MIT 的理由只有一条：这个应用默认就能在别人机器上执行命令，
-Apache-2.0 的免责和责任限制条款（第 7、8 条）写得比 MIT 那一段全大写细。
-附带好处是明确的专利授权与专利报复条款，以及「商标不随代码授权」——
-fork 出去的版本不能继续叫 AnyAI。
-
-分发时请一并保留 [`NOTICE`](NOTICE)。
-
-> 原名 SenseNova Chat。改名之后 Electron 的用户数据目录会变，
-> 应用启动时会自动把旧目录（`%APPDATA%\SenseNova Chat`）的配置搬过来，密钥不用重填。
+[Apache License 2.0](LICENSE). 分发时请保留 [NOTICE](NOTICE)。

@@ -30,7 +30,7 @@ export function reportMarkdown(store:ObservationStore,tasks:TaskObservation[],fi
   const pauses:Record<string,number>={};for(const t of tasks)for(const [k,n]of Object.entries(t.pauseReasons))pauses[k]=(pauses[k]??0)+n;
   const cause:Record<string,string>={user:'用户暂停',quota:'额度',budget:'阶段预算',input:'缺少信息/能力',permission:'权限',uncertain:'外部结果不确定',verification:'验收',connection:'连接',other:'其他'};
   const failures=tasks.filter(t=>t.feedback?.outcome==='unresolved'||t.feedback?.outcome==='partial'||t.acceptance.failed>0||t.pauseCount>0).slice().sort((a,b)=>b.lastAt-a.lastAt);
-  return `# AnyAI 使用分析\n\n生成时间：${new Date(now).toISOString()}。统计单位为任务，续跑阶段归属于原任务。\n\n`+
+  return `# wickrunAI 使用分析\n\n生成时间：${new Date(now).toISOString()}。统计单位为任务，续跑阶段归属于原任务。\n\n`+
     `## 实际交付和未解决事项\n\n本次范围 ${s.total} 个任务。${Object.entries(s.stateCounts).map(([k,n])=>`${statusLabel[k]??'未知状态'} ${n}`).join('；')||'暂无记录'}。\n\n`+
     `已列验收条件全部通过 ${s.accepted} 个任务；含未通过条件 ${s.failedAcceptance} 个、未建清单或含未检查条件 ${s.unchecked} 个、含无法核验条件 ${s.unverifiable} 个。这些类别可能重叠，不能相加当成任务总数。清单由模型整理，程序与模型检查的方法见 tasks.jsonl，不能据此断言覆盖全部用户意图。\n\n${feedback}\n\n`+
     `## 主要阻塞与返工线索\n\n${s.paused} 个任务曾暂停，${s.resumed} 个任务已续跑，${s.resumedEnded} 个续跑任务当前执行结束；尚未继续不等于失败。\n\n暂停事件原因：${Object.entries(pauses).map(([k,n])=>`${cause[k]??'其他'} ${n}`).join('；')||'没有观察到暂停'}。这些是事件数，一个任务可能暂停多次。\n\n`+

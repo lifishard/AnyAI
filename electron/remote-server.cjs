@@ -75,7 +75,7 @@ async function handle(req, res) {
 
   // /ping 不校验 token，只用来让手机确认地址通不通
   if (url.pathname === '/ping') {
-    send(res, 200, { ok: true, app: 'anyai', host: os.hostname() });
+    send(res, 200, { ok: true, app: 'anyai', productName: 'wickrunAI', displayName: '灯芯AI', host: os.hostname() });
     return;
   }
 

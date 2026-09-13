@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 export function normalizeLinuxAssets(dir,version){
   requiredAssets(version);
-  const aliases=[['x86_64','AppImage'],['amd64','deb']].map(([arch,ext])=>[`AnyAI-${version}-linux-${arch}.${ext}`,`AnyAI-${version}-linux-x64.${ext}`]);
+  const aliases=[['x86_64','AppImage'],['amd64','deb']].map(([arch,ext])=>[`wickrunAI-${version}-linux-${arch}.${ext}`,`wickrunAI-${version}-linux-x64.${ext}`]);
   for(const [from,to] of aliases){
     if(fs.existsSync(path.join(dir,from))){
       if(fs.existsSync(path.join(dir,to)))throw new Error(`Conflicting Linux release assets: ${to}`);
@@ -18,9 +18,9 @@ export function normalizeLinuxAssets(dir,version){
 }
 export function requiredAssets(version){
   if(!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Invalid release version');
-  return [`AnyAI-${version}-win-x64-setup.exe`,`AnyAI-${version}-win-x64-portable.exe`,
-    ...['x64','arm64'].flatMap(arch=>['dmg','zip'].map(ext=>`AnyAI-${version}-mac-${arch}.${ext}`)),
-    `AnyAI-${version}-linux-x64.AppImage`,`AnyAI-${version}-linux-x64.deb`];
+  return [`wickrunAI-${version}-win-x64-setup.exe`,`wickrunAI-${version}-win-x64-portable.exe`,
+    ...['x64','arm64'].flatMap(arch=>['dmg','zip'].map(ext=>`wickrunAI-${version}-mac-${arch}.${ext}`)),
+    `wickrunAI-${version}-linux-x64.AppImage`,`wickrunAI-${version}-linux-x64.deb`];
 }
 export function verifyReleaseAssets(dir,version){
   const names=requiredAssets(version);

@@ -17,8 +17,8 @@ let cache = null;
  * 应用改名（SenseNova Chat → AnyAI）会让 app.getPath('userData') 指向新目录，
  * 旧的配置、会话、密钥看起来就「凭空消失」了。这里做一次性搬迁。
  *
- * 密钥不用担心：safeStorage 的加密密钥是按操作系统用户算的，跟应用名无关，
- * 搬过来照样解得开。
+ * safeStorage 在 macOS / Linux 上依赖应用身份；文件复制不能保证跨名称解密。
+ * wickrunAI 启动时保留 AnyAI 的内部身份和数据路径，避免再次触发这类迁移。
  */
 const LEGACY_DIRS = ['SenseNova Chat', 'sensenova-chat', 'SenseNova-Chat'];
 

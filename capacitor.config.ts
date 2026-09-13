@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'dev.anyai.app',
-  appName: 'AnyAI',
+  appName: '灯芯AI',
   webDir: 'dist',
   android: {
     allowMixedContent: false,

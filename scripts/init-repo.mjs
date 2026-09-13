@@ -16,10 +16,10 @@ const [owner, repoArg] = process.argv.slice(2);
 
 if (!owner) {
   console.error('\n用法：node scripts/init-repo.mjs <owner> [repo]');
-  console.error('例如：node scripts/init-repo.mjs octocat anyai\n');
+  console.error('例如：node scripts/init-repo.mjs octocat wickrunAI\n');
   process.exit(1);
 }
-const repo = repoArg || 'anyai';
+const repo = repoArg || 'wickrunAI';
 
 const FILES = [
   'package.json',
@@ -37,6 +37,7 @@ for (const rel of FILES) {
   if (!fs.existsSync(p)) continue;
   const before = fs.readFileSync(p, 'utf8');
   const after = before
+    .replaceAll('YOUR-GITHUB-USERNAME/wickrunAI', `${owner}/${repo}`)
     .replaceAll('YOUR-GITHUB-USERNAME/anyai', `${owner}/${repo}`)
     .replaceAll('YOUR-GITHUB-USERNAME', owner);
   if (after !== before) {

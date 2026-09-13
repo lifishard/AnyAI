@@ -39,7 +39,7 @@ try {
       const additions = diff.split('\n').filter(l=>l.startsWith('+')&&!l.startsWith('+++')).join('\n');
       if (scanText(additions,'暂存区').length) throw new Error('暂存区出现疑似密钥，未提交；暂存状态已保留，请检查。');
       const staged = git(['diff','--cached','--name-only','-z']).split('\0').filter(Boolean);
-      if (staged.length) git(['commit','-m',args.find(a=>!a.startsWith('--')) || `更新 AnyAI ${JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version}`]);
+      if (staged.length) git(['commit','-m',args.find(a=>!a.startsWith('--')) || `更新 wickrunAI ${JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version}`]);
     }
     // A previous attempt may have committed successfully and failed only at push.
     push();

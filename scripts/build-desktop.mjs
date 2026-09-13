@@ -83,7 +83,7 @@ const platformFlag = () =>
   process.platform === 'darwin' ? '--mac' : process.platform === 'linux' ? '--linux' : '--win';
 
 rule();
-line('  AnyAI — 打包桌面版');
+line('  wickrunAI — 打包桌面版');
 rule();
 line();
 
@@ -139,14 +139,14 @@ line();
 /**
  * 打包前先看看应用是不是还开着。
  *
- * NSIS 要把 release/win-unpacked 整个塞进安装包，而正在运行的 AnyAI.exe
+ * NSIS 要把 release/win-unpacked 整个塞进安装包，而正在运行的 wickrunAI.exe
  * 把自己和 resources/elevate.exe 锁着，electron-builder 只会一直刷
  * 「output file is locked for writing (maybe by virus scanner)」——
  * 那句提示会把人往杀毒软件上带，其实九成是自己没关。
  */
 function runningInstances() {
   if (!isWin) return [];
-  const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq AnyAI.exe', '/NH'], {
+  const r = spawnSync('tasklist', ['/FI', 'IMAGENAME eq wickrunAI.exe', '/NH'], {
     encoding: 'utf8',
     shell: true,
   });
@@ -154,17 +154,17 @@ function runningInstances() {
   return out
     .split('\n')
     .map((l) => l.trim())
-    .filter((l) => /^AnyAI\.exe/i.test(l));
+    .filter((l) => /^wickrunAI\.exe/i.test(l));
 }
 
 const running = runningInstances();
 if (running.length) {
   line();
   rule();
-  line('  AnyAI 还开着，先关掉');
+  line('  wickrunAI 还开着，先关掉');
   rule();
   line();
-  line(`  检测到 ${running.length} 个正在运行的 AnyAI.exe。`);
+  line(`  检测到 ${running.length} 个正在运行的 wickrunAI.exe。`);
   line('  正在运行的程序会把自己的 exe 锁住，打包时会一直卡在');
   line('  「output file is locked for writing」—— 那句提示会甩锅给杀毒软件，');
   line('  但九成情况就是应用自己没关。');
@@ -175,7 +175,7 @@ if (running.length) {
 
   const ans = await ask('  要现在结束这些进程吗？[y/N] ');
   if (/^y(es)?$/i.test(ans.trim())) {
-    spawnSync('taskkill', ['/IM', 'AnyAI.exe', '/F'], { shell: true, stdio: 'inherit' });
+    spawnSync('taskkill', ['/IM', 'wickrunAI.exe', '/F'], { shell: true, stdio: 'inherit' });
     await new Promise((r) => setTimeout(r, 1200));
     line('  已结束，继续打包。');
     line();
@@ -253,7 +253,7 @@ if (usedFallback) {
   const unpacked = path.join(releaseDir, isWin ? 'win-unpacked' : 'linux-unpacked');
   let exe = '';
   try {
-    const hit = fs.readdirSync(unpacked).find((f) => /^AnyAI\.exe$/i.test(f));
+    const hit = fs.readdirSync(unpacked).find((f) => /^wickrunAI\.exe$/i.test(f));
     if (hit) exe = path.join(unpacked, hit);
   } catch {
     /* 下面统一处理 */
@@ -261,7 +261,7 @@ if (usedFallback) {
 
   if (exe && isWin) {
     const desktop = path.join(os.homedir(), 'Desktop');
-    const lnk = path.join(desktop, 'AnyAI.lnk');
+    const lnk = path.join(desktop, '灯芯AI.lnk');
     const ps = [
       '$W = New-Object -ComObject WScript.Shell',
       `$S = $W.CreateShortcut('${lnk}')`,
@@ -276,7 +276,7 @@ if (usedFallback) {
     });
 
     if (r.status === 0 && fs.existsSync(lnk)) {
-      line('  已经在桌面建好快捷方式：AnyAI');
+      line('  已经在桌面建好快捷方式：灯芯AI');
       line('  双击就能用，不需要安装，也不用再开命令行。');
     } else {
       line('  快捷方式没建成，手动拖一个：');

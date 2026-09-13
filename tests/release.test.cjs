@@ -17,13 +17,13 @@ test('release requires all eight platform packages with valid headers',async t=>
     fs.writeSync(fd,header);fs.ftruncateSync(fd,1024*1024);fs.closeSync(fd);
   }
   assert.deepEqual(verifyReleaseAssets(dir,'1.3.1'),names);
-  fs.renameSync(path.join(dir,'AnyAI-1.3.1-linux-x64.AppImage'),path.join(dir,'AnyAI-1.3.1-linux-x86_64.AppImage'));
-  fs.renameSync(path.join(dir,'AnyAI-1.3.1-linux-x64.deb'),path.join(dir,'AnyAI-1.3.1-linux-amd64.deb'));
-  fs.writeFileSync(path.join(dir,'latest-linux.yml'),'url: AnyAI-1.3.1-linux-x86_64.AppImage');
+  fs.renameSync(path.join(dir,'wickrunAI-1.3.1-linux-x64.AppImage'),path.join(dir,'wickrunAI-1.3.1-linux-x86_64.AppImage'));
+  fs.renameSync(path.join(dir,'wickrunAI-1.3.1-linux-x64.deb'),path.join(dir,'wickrunAI-1.3.1-linux-amd64.deb'));
+  fs.writeFileSync(path.join(dir,'latest-linux.yml'),'url: wickrunAI-1.3.1-linux-x86_64.AppImage');
   normalizeLinuxAssets(dir,'1.3.1');
   assert.deepEqual(verifyReleaseAssets(dir,'1.3.1'),names);
-  assert.equal(fs.readFileSync(path.join(dir,'latest-linux.yml'),'utf8'),'url: AnyAI-1.3.1-linux-x64.AppImage');
-  const mac=path.join(dir,'AnyAI-1.3.1-mac-arm64.dmg');
+  assert.equal(fs.readFileSync(path.join(dir,'latest-linux.yml'),'utf8'),'url: wickrunAI-1.3.1-linux-x64.AppImage');
+  const mac=path.join(dir,'wickrunAI-1.3.1-mac-arm64.dmg');
   fs.renameSync(mac,mac+'.saved');
   assert.throws(()=>verifyReleaseAssets(dir,'1.3.1'),/Missing or incomplete/);
   fs.renameSync(mac+'.saved',mac);

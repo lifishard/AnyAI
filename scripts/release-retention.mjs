@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 const require=createRequire(import.meta.url);
 
 const versionPattern = /^\d+\.\d+\.\d+$/;
-const artifactPattern = /^(?:AnyAI|SenseNova Chat)-(\d+\.\d+\.\d+)-.+\.(?:exe|dmg|zip|AppImage|deb)(?:\.blockmap)?$/i;
+const artifactPattern = /^(?:wickrunAI|AnyAI|SenseNova Chat)-(\d+\.\d+\.\d+)-.+\.(?:exe|dmg|zip|AppImage|deb)(?:\.blockmap)?$/i;
 const compare = (a,b) => { const x=a.split('.').map(Number),y=b.split('.').map(Number); return y[0]-x[0]||y[1]-x[1]||y[2]-x[2]; };
 export function retentionPlan(releaseDir) {
   const root = path.resolve(releaseDir);
@@ -24,7 +24,7 @@ export function retentionPlan(releaseDir) {
   if(fs.existsSync(loose)&&!fs.lstatSync(loose).isSymbolicLink()){
     try{
       const pkg=JSON.parse(require('@electron/asar').extractFile(path.join(loose,'resources','app.asar'),'package.json'));
-      if(['anyai','sensenova-chat'].includes(pkg.name)&&versionPattern.test(pkg.version))entries.push({name:'win-unpacked',version:pkg.version,directory:true,usable:false});
+      if(['wickrunai','anyai','sensenova-chat'].includes(pkg.name)&&versionPattern.test(pkg.version))entries.push({name:'win-unpacked',version:pkg.version,directory:true,usable:false});
     }catch{/* Unknown folders are not release cleanup targets. */}
   }
   return {root,keep,remove:entries.filter(e=>!keep.includes(e.version))};
@@ -41,7 +41,7 @@ export function pruneReleases(releaseDir, builtVersion, options={}) {
   if (!usable) throw new Error('未找到本次成功生成的安装包，旧产物保持不变');
   let running=options.runningPaths??[];
   if(options.runningPaths===undefined&&process.platform==='win32'){
-    const check=spawnSync('powershell',['-NoProfile','-NonInteractive','-Command',"Get-CimInstance Win32_Process -Filter \"Name LIKE 'AnyAI%' OR Name LIKE 'SenseNova Chat%'\" -ErrorAction Stop | Select-Object ProcessId,ParentProcessId,ExecutablePath | ConvertTo-Json -Compress"],{encoding:'utf8',windowsHide:true});
+    const check=spawnSync('powershell',['-NoProfile','-NonInteractive','-Command',"Get-CimInstance Win32_Process -Filter \"Name LIKE 'wickrunAI%' OR Name LIKE 'AnyAI%' OR Name LIKE 'SenseNova Chat%'\" -ErrorAction Stop | Select-Object ProcessId,ParentProcessId,ExecutablePath | ConvertTo-Json -Compress"],{encoding:'utf8',windowsHide:true});
     if(check.error||check.status!==0)throw new Error('无法核实运行中的应用位置，旧产物保持不变');
     const found=check.stdout.trim()?JSON.parse(check.stdout):[];
     const processes=Array.isArray(found)?found:[found];

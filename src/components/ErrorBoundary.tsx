@@ -26,7 +26,7 @@ export default class ErrorBoundary extends React.Component<
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     this.setState({ info: info.componentStack ?? '' });
-    console.error('[AnyAI] 渲染出错：', error, info);
+    console.error('[wickrunAI] 渲染出错：', error, info);
   }
 
   render() {
