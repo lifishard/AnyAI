@@ -63,7 +63,7 @@ export async function loadProjects(): Promise<Project[]> {
     const raw = await getTransport().kvGet(K_PROJECTS);
     if (!raw) return [];
     const list = JSON.parse(raw);
-    if (!Array.isArray(list)) return [];
+    if (!Array.isArray(list)) throw new Error("记录格式无效");
     return (list as Project[]).map((p) => ({
       ...p,
       docs: p.docs ?? [],
@@ -71,8 +71,8 @@ export async function loadProjects(): Promise<Project[]> {
       memory: p.memory ?? '',
       instructions: p.instructions ?? '',
     }));
-  } catch {
-    return [];
+  } catch (error) {
+    throw new Error(`Project 数据读取失败：${String(error)}`);
   }
 }
 

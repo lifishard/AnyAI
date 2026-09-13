@@ -53,6 +53,26 @@ interface NativeEvent {
 
 interface ElectronBridge {
   platform: 'electron';
+  collaborationRead(): Promise<import('./collaboration').CollaborationData>;
+  collaborationUpdate(revision:number, project:import('./collaboration').TeamProject): Promise<import('./collaboration').CollaborationData>;
+  collaborationClaim(projectId:string,runId:string): Promise<import('./collaboration').CollaborationData>;
+  teamFilesCreate(projectId:string,taskId:string,memberId:string,root:string): Promise<import('./collaboration').FileSession>;
+  teamFilesDiff(id:string): Promise<import('./collaboration').FileSession>;
+  teamFilesRecover(id:string):Promise<import('./collaboration').FileSession>;
+  teamFilesPreview(id:string,path:string): Promise<{path:string;before:string|null;after:string|null}>;
+  teamFilesMerge(id:string,files:{path:string;beforeHash:string|null;afterHash:string|null}[]): Promise<import('./collaboration').FileSession>;
+  teamFilesList(): Promise<(import('./collaboration').FileSession & {projectId:string})[]>;
+  toolAbort(runId:string):Promise<void>;
+  backupStatus():Promise<Record<string,unknown>>;
+  backupList():Promise<Record<string,unknown>[]>;
+  backupCreate(mode:'local'|'export'):Promise<Record<string,unknown>|null>;
+  backupPreview(id?:string):Promise<{input:{id?:string;token?:string};summary:Record<string,unknown>}|null>;
+  backupRestore(input:{id?:string;token?:string}):Promise<void>;
+  pickClientBinary():Promise<string|null>;
+  clientCheck(kind:'codex'|'claude'):Promise<Record<string,unknown>>;
+  clientLogin():Promise<Record<string,unknown>>;
+  clientRun(args:{projectId:string;runId:string;attemptId:string;memberId:string;prompt:string;fileSessionId?:string}):Promise<{status:string;text:string;error?:string;threadId?:string;turnId?:string}>;
+  clientApprove(id:string,approved:boolean):Promise<void>;
   runSave(record: RunRecord): Promise<void>;
   runList(): Promise<RunRecord[]>;
   runRemove(id: string): Promise<void>;

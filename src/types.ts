@@ -501,6 +501,8 @@ export interface RemoteConfig {
 }
 
 export interface AppSettings {
+  clients?: { codexBin:string };
+  collaborationView?: { visible:boolean; projectId?:string };
   keyProfiles: KeyProfile[];
   activeKeyProfileId: string | null;
   customModels: Record<string, ModelInfo[]>;
@@ -682,6 +684,7 @@ export interface Artifact {
 
 /** 工具执行时传给原生层的上下文（不含明文密钥，密钥由原生层自己从安全存储取） */
 export interface ToolContext {
+  teamExecution?: { projectId:string; runId:string; attemptId:string; memberId:string; fileSessionId?:string };
   workspaceRoots: string[];
   searchProvider: SearchProvider;
   searxngUrl: string;

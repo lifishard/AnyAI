@@ -1,5 +1,6 @@
 import React from 'react';
 import AnchoredPopover from './AnchoredPopover';
+import './Composer.css';
 import type {
   ApprovalMode,
   Attachment,
@@ -34,6 +35,8 @@ const APPROVAL_OPTIONS: { value: ApprovalMode; label: string; desc: string }[] =
   },
 ];
 
+type SendMode = 'chat' | 'work';
+
 export default function Composer(props: {
   contextPreview?: ContextPreview;
   quotes: import('../types').MessageQuote[];
@@ -46,7 +49,7 @@ export default function Composer(props: {
   disabled: boolean;
   disabledReason?: string;
   sendKey: 'enter' | 'mod-enter';
-  onSend: (text: string) => void;
+  onSend: (text: string, mode?: 'chat' | 'work') => void;
   onStop: () => void;
   stream: boolean;
   toolCount: number;
@@ -58,6 +61,9 @@ export default function Composer(props: {
   onPickWorkspace: () => void;
   workspaceCount: number;
   canPickLocal: boolean;
+
+  sendMode?: SendMode;
+  onSendMode?: (mode: SendMode) => void;
 
   approvalMode: ApprovalMode;
   onApprovalMode: (m: ApprovalMode) => void;
@@ -101,6 +107,7 @@ export default function Composer(props: {
   onDropQueued: (index: number) => void;
 }) {
   const [text, setText] = React.useState('');
+  const [localMode, setLocalMode] = React.useState<SendMode>(props.sendMode ?? 'work');
   const contextDraft = React.useMemo(() => ({ id:'draft', role:'user' as const, content:text, createdAt:0,
     attachments:props.attachments, quotes:props.quotes, quoteOnly:props.quoteOnly && props.quotes.length > 0 }),[text,props.attachments,props.quotes,props.quoteOnly]);
   const [plusOpen, setPlusOpen] = React.useState(false);
@@ -111,6 +118,7 @@ export default function Composer(props: {
   const plusRef = React.useRef<HTMLDivElement>(null);
   const approvalRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => { if (props.quotes.length) ref.current?.focus(); }, [props.quotes.length]);
+  const mode: SendMode = props.sendMode ?? localMode;
 
   /* ---- 斜杠唤起技能 ---- */
   const slashQ = slashQuery(text, caret);
@@ -151,8 +159,20 @@ export default function Composer(props: {
     const t = text.trim();
     // 生成中不拦：App 会把它排进队列，等这一轮结束自动发
     if ((!t && props.attachments.length === 0) || props.disabled) return;
-    props.onSend(t);
+    props.onSend(t, mode);
     setText('');
+  }
+
+  function setSendMode(next: SendMode) {
+    if (next === mode) {
+      return;
+    }
+    if (props.sendMode) {
+      props.onSendMode?.(next);
+    } else {
+      setLocalMode(next);
+      props.onSendMode?.(next);
+    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -481,8 +501,40 @@ export default function Composer(props: {
 
             {/* ---- 右下角 ---- */}
             {props.contextPreview ? <ContextMeter preview={props.contextPreview} draft={contextDraft} /> : null}
-            {props.toolCount > 0 ? <span className="chip">{props.toolCount} 工具</span> : null}
             {!props.stream ? <span className="chip">非流式</span> : null}
+
+            <div className="composer-mode-switch" role="group" aria-label="请求模式" title="Chat 不下发工具；Work 使用本次会话的工具配置">
+              <button
+                type="button"
+                aria-pressed={mode === 'chat'}
+                aria-label="Chat 模式：仅文本对话，不下发工具"
+                className={`btn sm ghost mode-switch-btn${mode === 'chat' ? ' selected' : ''}`}
+                onClick={() => setSendMode('chat')}
+                onKeyDown={(event) => {
+                  if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                    event.preventDefault();
+                    setSendMode(mode === 'chat' ? 'work' : 'chat');
+                  }
+                }}
+              >
+                Chat
+              </button>
+              <button
+                type="button"
+                aria-pressed={mode === 'work'}
+                aria-label="Work 模式：可调用工具，按当前审批规则执行"
+                className={`btn sm ghost mode-switch-btn${mode === 'work' ? ' selected' : ''}`}
+                onClick={() => setSendMode('work')}
+                onKeyDown={(event) => {
+                  if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                    event.preventDefault();
+                    setSendMode(mode === 'chat' ? 'work' : 'chat');
+                  }
+                }}
+              >
+                Work
+              </button>
+            </div>
 
             <EffortPicker
               level={props.effortLevel}

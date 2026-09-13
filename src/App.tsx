@@ -55,7 +55,9 @@ import type { EffortLevel } from './lib/effort';
 import { loadSkills, saveSkills, skillSystemBlock, type Skill } from './lib/skills';
 import { collectArtifacts } from './lib/artifacts';
 import { applyPlan, describeSync, planSync } from './lib/skillsync';
-import { loadProjects, projectSystemBlock, saveProjects, type Project } from './lib/projects';
+import { loadProjects, makeProject, projectSystemBlock, saveProjects, type Project } from './lib/projects';
+import { teamRuntime } from './lib/team-runtime';
+import DataBackupPanel from './components/collaboration/DataBackupPanel';
 import {
   dueTasks,
   loadTasks,
@@ -77,6 +79,7 @@ import GrantDialog, { REMEMBER_DAYS } from './components/GrantDialog';
 import WorkspaceDialog from './components/WorkspaceDialog';
 import { Modal, Toast, useToast } from './components/ui';
 const ObservationPanel = React.lazy(()=>import('./components/ObservationPanel'));
+const TeamWorkspace = React.lazy(()=>import('./components/collaboration/TeamWorkspace'));
 
 const EXAMPLES = [
   '日日新现在有哪些免费模型，各自的上下文长度是多少？',
@@ -85,10 +88,17 @@ const EXAMPLES = [
   '把当前 Chrome 标签页的内容总结成三点',
 ];
 
-interface QueuedInput { text: string; attachments: Attachment[]; quotes: MessageQuote[]; quoteOnly: boolean; conversationId: string | null }
+interface QueuedInput { toolsEnabled?:boolean; text: string; attachments: Attachment[]; quotes: MessageQuote[]; quoteOnly: boolean; conversationId: string | null }
 
 export default function App() {
+  const [bootError, setBootError] = React.useState<string | null>(null);
+  const [bootReady, setBootReady] = React.useState(false);
+  const [bootAttempt, setBootAttempt] = React.useState(0);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
+  const reportSaveError = (error: unknown) => setSaveError(`尚未保存：${String(error)}`);
   const [settings, setSettings] = React.useState<AppSettings | null>(null);
+  const teamVisible = Boolean(settings?.collaborationView?.visible);
+  const setTeamVisible = (visible:boolean) => setSettings(s=>s?{...s,collaborationView:{...s.collaborationView,visible}}:s);
   const [conversations, setConversations] = React.useState<Conversation[]>([]);
   const [activeId, setActiveId] = React.useState<string | null>(null);
 
@@ -166,6 +176,8 @@ export default function App() {
   /* ---------------- 启动加载 ---------------- */
 
   React.useEffect(() => {
+    let cancelled = false;
+    setBootError(null);
     void (async () => {
       const [s, c, pr, sk, tk] = await Promise.all([
         loadSettings(),
@@ -177,6 +189,7 @@ export default function App() {
       let recovered = c;
       try { recovered = recoverConversations(c, await loadRuns()); }
       catch (err) { toast.show(`执行记录读取失败：${String(err)}`, 6000); }
+      if (cancelled) return;
       setSettings(s);
       setConversations(recovered);
       setProjects(pr);
@@ -198,29 +211,24 @@ export default function App() {
         const i = await bridge.info();
         setInfo({ encryptionAvailable: i.encryptionAvailable, storePath: i.storePath });
       }
-    })();
-  }, []);
+      if (!cancelled) setBootReady(true);
+    })().catch(error => { if (!cancelled) setBootError(String(error)); });
+    return () => { cancelled = true; };
+  }, [bootAttempt]);
 
   React.useEffect(() => {
-    if (settings) void saveSettings(settings);
+    if (settings && bootReady) void saveSettings(settings).catch(reportSaveError);
     if (settings) setRemoteConfig(settings.remote);
-  }, [settings]);
+  }, [settings, bootReady]);
 
   React.useEffect(() => {
-    if (settings) saveConversationsDebounced(conversations);
-  }, [conversations, !!settings]);
+    if (bootReady) saveConversationsDebounced(conversations, reportSaveError);
+  }, [conversations, bootReady]);
 
-  const bootedRef = React.useRef(false);
   React.useEffect(() => {
-    // 首次渲染时这三个还是空数组，别把用户的数据覆盖成空
-    if (!bootedRef.current) {
-      bootedRef.current = true;
-      return;
-    }
-    void saveProjects(projects);
-    void saveSkills(skills);
-    void saveTasks(tasks);
-  }, [projects, skills, tasks]);
+    if (!bootReady) return;
+    void Promise.all([saveProjects(projects), saveSkills(skills), saveTasks(tasks)]).catch(reportSaveError);
+  }, [projects, skills, tasks, bootReady]);
 
   /* ---------------- 启动时自动同步技能文件夹 ---------------- */
 
@@ -313,6 +321,8 @@ export default function App() {
 
   const config: GenerationConfig | null = active?.config ?? settings?.defaultConfig ?? null;
   const canRunHostTools = getTransport().canRunTools();
+  React.useEffect(()=>{if(!settings||!bootReady||!desktop())return;teamRuntime.settings=()=>settingsRef.current;void teamRuntime.load();},[bootReady]);
+  React.useEffect(()=>{if(!bootReady||!desktop())return;const timer=setInterval(()=>void teamRuntime.tick(),20000);return()=>clearInterval(timer);},[bootReady]);
 
   /* ---------------- 模型列表 ---------------- */
 
@@ -809,7 +819,7 @@ export default function App() {
     async (text: string, replaceFromIndex?: number, resumeFrom?: RunState, queuedInput?: QueuedInput, resolution?: 'skip' | 'retry') => {
       if (!settings) return;
       if (startingRef.current || busy || runningRef.current) {
-        setQueue((q) => [...q, queuedInput ?? { text, attachments: [...attachments], quotes: [...quotes], quoteOnly, conversationId: active?.id ?? null }]);
+        setQueue((q) => [...q, queuedInput ?? { toolsEnabled:config?.toolsEnabled, text, attachments: [...attachments], quotes: [...quotes], quoteOnly, conversationId: active?.id ?? null }]);
         setAttachments([]); setQuotes([]);
         return;
       }
@@ -828,7 +838,7 @@ export default function App() {
         conv = newConversation(settings.defaultConfig, profile.id);
         baseList = [conv, ...conversations];
       }
-      const cfg = conv.config;
+      const cfg = queuedInput?.toolsEnabled===undefined?conv.config:{...conv.config,toolsEnabled:queuedInput.toolsEnabled};
 
       if (!cfg.model) {
         startingRef.current = false;
@@ -1213,7 +1223,8 @@ export default function App() {
 
   /* ---------------- 渲染 ---------------- */
 
-  if (!settings || !config) {
+  if (bootError) return <div className="empty" role="alert" style={{padding: 48}}><h2>本地数据未能读取</h2><p>{bootError}</p><p>原记录已保留。修复文件或恢复备份后重试。</p><button className="btn" onClick={() => setBootAttempt(n => n + 1)}>重新读取</button><button className="btn" onClick={() => void desktop()?.info().then(i => desktop()?.revealPath(i.storePath))}>打开数据位置</button><DataBackupPanel/></div>;
+  if (!bootReady || !settings || !config) {
     return <div className="empty" style={{ paddingTop: 80 }}>加载中…</div>;
   }
 
@@ -1274,6 +1285,8 @@ export default function App() {
       busy={Boolean(busy)}
       disabled={false}
       sendKey={settings.sendKey}
+      sendMode={config.toolsEnabled ? "work" : "chat"}
+      onSendMode={(mode) => { setConfig({ toolsEnabled: mode === "work" }); if (mode === "chat" && busy) { busy.handle.abort(); toast.show("已停止后续工具调度，正在保存当前检查点", 5000); } }}
       onSend={(t) => void send(t)}
       onStop={stop}
       stream={config.stream}
@@ -1335,7 +1348,7 @@ export default function App() {
 
   return (
     <div className="app">
-      {!sidebarHidden ? (
+      {!sidebarHidden && !teamVisible ? (
       <aside
         className={`sidebar${sidebarOpen ? ' open' : ''}`}
         style={{ width: sidebarW, flexBasis: sidebarW }}
@@ -1375,7 +1388,7 @@ export default function App() {
       </aside>
       ) : null}
 
-      {!sidebarHidden ? (
+      {!sidebarHidden && !teamVisible ? (
         <Resizer
           side="left"
           width={sidebarW}
@@ -1396,8 +1409,11 @@ export default function App() {
         />
       )}
 
-      <main className="main">
+      {teamVisible ? <div className="team-workspace-container"><React.Suspense fallback={<div className="empty">正在打开协作空间…</div>}><TeamWorkspace projects={projects} settings={settings} sourceConversation={active} beforeRestore={async()=>{stop();await teamRuntime.pauseAll();await saveConversationsNow(conversations);}} onProject={projectId=>setSettings(s=>s?{...s,collaborationView:{visible:true,projectId}}:s)} initialProjectId={settings.collaborationView?.projectId??activeProject?.id} onSingle={()=>setTeamVisible(false)} onSettings={()=>{setSettingsTab('keys');setSettingsOpen(true);}} onCreateProject={name=>{const p=makeProject(name);setProjects(all=>[...all,p]);return p.id;}} onHandoff={(text,projectId)=>{const conv=newConversation(settings.defaultConfig,settings.activeKeyProfileId);conv.projectId=projectId;conv.title=titleFrom(text);conv.messages=[{id:uid(),role:'user',content:text,createdAt:Date.now()}];setConversations(all=>[...all,conv]);setActiveId(conv.id);setTeamVisible(false);}}/></React.Suspense></div> : null}
+      <main className="main" style={teamVisible?{display:'none'}:undefined}>
+        {saveError ? <div className="grant-banner" role="alert">{saveError}<button className="btn sm" onClick={() => { void Promise.all([saveSettings(settings), saveConversationsNow(conversations),saveProjects(projects),saveSkills(skills),saveTasks(tasks)]).then(() => setSaveError(null)).catch(reportSaveError); }}>重试保存</button></div> : null}
         <div className="topbar">
+          <button className="btn sm team-view-toggle" onClick={()=>setTeamVisible(true)}>单一 Agent ⇄ 协作空间</button>
           <button className="btn sm ghost only-narrow" onClick={() => setSidebarOpen(true)}>
             ☰
           </button>
@@ -1429,7 +1445,7 @@ export default function App() {
           <span className="spacer" />
           {!profile ? <span className="chip warn">未配置凭据</span> : null}
           <span className="chip">{config.model || '未选模型'}</span>
-          {config.toolsEnabled ? <span className="chip">{toolNames.length} 个工具</span> : null}
+
           <button className="btn sm" onClick={() => setConfigOpen((v) => !v)}>
             ⚙ 配置
           </button>
@@ -1512,7 +1528,7 @@ export default function App() {
         )}
       </main>
 
-      {openArtifact ? (
+      {openArtifact && !teamVisible ? (
         <>
           <Resizer
             side="right"
@@ -1530,7 +1546,7 @@ export default function App() {
         </>
       ) : null}
 
-      {configOpen ? (
+      {configOpen && !teamVisible ? (
       <aside className="config-panel open">
         <ConfigPanel
           profile={profile}

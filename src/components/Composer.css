@@ -1,0 +1,41 @@
+.composer-mode-switch {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.composer-mode-switch .mode-switch-btn {
+  border: none;
+  border-radius: 0;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+.composer-mode-switch .mode-switch-btn + .mode-switch-btn {
+  border-left: 1px solid var(--border);
+}
+
+.composer-mode-switch .mode-switch-btn.selected {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+}
+
+.composer-mode-switch .mode-switch-btn:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: -4px;
+}
+
+@media (max-width: 860px) {
+  .composer-mode-switch {
+    width: auto;
+  }
+
+  .composer-mode-switch .mode-switch-btn {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+}

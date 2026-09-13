@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseStatus, scanText, scanWorkingFiles } from './sync-checks.mjs';
-import { releaseTag } from './release-tag.mjs';
+import { releaseTag, checkReleaseTag } from './release-tag.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2), checkOnly = args.includes('--check-only');
 const git = values => execFileSync('git', values, { cwd: root, encoding: 'utf8', maxBuffer: 64*1024*1024 });
@@ -17,7 +17,11 @@ function push() {
 }
 try {
   git(['rev-parse','--is-inside-work-tree']);
+  const version=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version;
+  const lock=JSON.parse(fs.readFileSync(path.join(root,'package-lock.json'),'utf8'));
+  if(!/^\d+\.\d+\.\d+$/.test(version)||lock.version!==version||lock.packages?.['']?.version!==version)throw new Error('正式版本号或依赖锁文件不一致，已停止同步。');
   const files = parseStatus(git(['status','--porcelain=v1','-z']));
+  if(args.includes('--release'))checkReleaseTag(root,version,files.length>0);
   console.log(`待提交改动：${files.length} 个文件${checkOnly ? '；本次只检查' : ''}`);
   execFileSync(process.execPath,['scripts/check-lite.mjs'],{cwd:root,stdio:'inherit'});
   if (!args.includes('--skip-typecheck')) {

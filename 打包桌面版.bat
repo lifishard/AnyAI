@@ -1,21 +1,15 @@
 @echo off
-chcp 65001 > nul
+chcp 65001 >nul 2>&1
 setlocal
 cd /d "%~dp0"
-
-where node > nul 2>&1
+where node >nul 2>&1
 if errorlevel 1 goto nonode
-
-node "scripts\build-desktop.mjs"
+node "scripts\build-desktop.mjs" --install %*
 set "RC=%ERRORLEVEL%"
 echo.
 pause
 exit /b %RC%
-
 :nonode
-echo.
-echo   Node.js not found.
-echo   Install it from https://nodejs.org then run this again.
-echo.
+echo Node.js is required. Install Node.js 20 or newer, then retry.
 pause
 exit /b 1

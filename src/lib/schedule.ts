@@ -73,9 +73,10 @@ export async function loadTasks(): Promise<ScheduledTask[]> {
     const raw = await getTransport().kvGet(K_TASKS);
     if (!raw) return [];
     const list = JSON.parse(raw);
-    return Array.isArray(list) ? (list as ScheduledTask[]) : [];
-  } catch {
-    return [];
+    if (!Array.isArray(list)) throw new Error("记录格式无效");
+    return list as ScheduledTask[];
+  } catch (error) {
+    throw new Error(`ScheduledTask 数据读取失败：${String(error)}`);
   }
 }
 

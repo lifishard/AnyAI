@@ -19,9 +19,12 @@ import os from 'node:os';
 import path from 'node:path';
 import url from 'node:url';
 import { pruneReleases } from './release-retention.mjs';
+import { desktopInstallTarget, launchDesktopInstall } from './desktop-install.mjs';
 
 const root = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const isWin = process.platform === 'win32';
+const options = new Set(process.argv.slice(2));
+const installAfterBuild = isWin && options.has('--install') && !options.has('--no-install');
 const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('打包版本格式无效');
 const outputDir = `release/${version}`;
@@ -238,7 +241,7 @@ if (!eb.ok) {
 /* ---------------- 结果 ---------------- */
 
 const releaseDir = path.join(root, outputDir);
-if (!usedFallback) {
+if (!usedFallback && !options.has('--no-cleanup')) {
   try { const retention = pruneReleases(path.join(root, 'release'), version); line(`保留版本：${retention.keep.join('、')}；已清理 ${retention.remove.length-retention.skipped.length} 项旧产物。`); if(retention.skipped.length)line(`仍在运行的旧产物暂留：${retention.skipped.join('、')}`); }
   catch (error) { line(`安装包已生成，旧产物清理未完成：${error.message}`); }
 }
@@ -315,10 +318,22 @@ if (usedFallback) {
 line();
 try {
   const open = usedFallback ? path.join(releaseDir, 'win-unpacked') : releaseDir;
-  if (isWin) spawnSync('explorer', [open], { shell: true });
+  if (options.has('--no-open') || installAfterBuild) { /* The installer or verification mode owns the next step. */ }
+  else if (isWin && !installAfterBuild) spawnSync('explorer', [open], { shell: true });
   else if (process.platform === 'darwin') spawnSync('open', [open]);
   else spawnSync('xdg-open', [open]);
 } catch {
   /* 打不开就算了，路径已经打出来了 */
 }
 line();
+
+if (installAfterBuild) {
+  try {
+    const target = desktopInstallTarget(root, version, usedFallback);
+    await launchDesktopInstall(target);
+    line(usedFallback ? '安装包未生成，已打开免安装版。' : `已打开 ${version} 安装向导；按向导完成安装即可。`);
+  } catch (error) {
+    line(`安装程序未能打开：${error.message}`);
+    process.exitCode = 1;
+  }
+}

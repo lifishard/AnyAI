@@ -20,6 +20,12 @@ const isDev = Boolean(DEV_URL);
 const inflight = new Map();
 
 let mainWindow = null;
+let dataBackup = null;
+let restoringData = false;
+let storageStartupError = null;
+let localClients = null;
+const activeToolControllers = new Map();
+function dataAvailable(){if(storageStartupError)throw Error('本地记录需要恢复，已停止读写：'+storageStartupError);if(restoringData)throw Error('正在恢复数据，请等待重启');const error=dataBackup?.recoveryError;if(error)throw Error('数据恢复未完成，已停止读写：'+error);}
 
 /* ------------------------------------------------------------------ *
  * 窗口
@@ -38,6 +44,7 @@ const BOUNDS_KEY = 'snc:window-bounds:v1';
 
 function savedBounds() {
   try {
+    dataAvailable();
     const raw = store.kvGet(BOUNDS_KEY);
     if (!raw) return null;
     const b = JSON.parse(raw);
@@ -73,6 +80,7 @@ function rememberBounds(win) {
   if (boundsTimer) clearTimeout(boundsTimer);
   boundsTimer = setTimeout(() => {
     try {
+      dataAvailable();
       if (!win || win.isDestroyed()) return;
       const maximized = win.isMaximized();
       // 最大化时存「还原后」的尺寸，否则取消最大化会得到一个全屏大小的小窗口
@@ -116,6 +124,7 @@ function createWindow() {
   mainWindow.on('close', () => {
     if (boundsTimer) clearTimeout(boundsTimer);
     try {
+      dataAvailable();
       const maximized = mainWindow.isMaximized();
       const b = maximized ? mainWindow.getNormalBounds() : mainWindow.getBounds();
       store.kvSet(BOUNDS_KEY, JSON.stringify({ ...b, maximized }));
@@ -203,6 +212,7 @@ function emit(sender, requestId, type, data, status) {
 }
 
 async function handleChat(evt, init) {
+  dataAvailable();
   const sender = evt.sender;
   const { requestId, url, headers, body, stream, timeoutMs } = init;
   const controller = new AbortController();
@@ -293,9 +303,50 @@ async function handleGetJson(_evt, { url, headers, timeoutMs }) {
  * ------------------------------------------------------------------ */
 
 function registerIpc() {
-  ipcMain.handle('snc:runSave', (_e, record) => runtimeStore().save(record));
-  ipcMain.handle('snc:runList', () => runtimeStore().list());
-  ipcMain.handle('snc:runRemove', (_e, id) => runtimeStore().remove(id));
+  dataBackup = require('./data-backup.cjs').createDataBackup(app.getPath('userData'));
+  const importedBackups = new Map();
+  ipcMain.handle('snc:backupStatus',()=>({...dataBackup.status(),storePath:path.join(app.getPath('userData'),'store.json')}));
+  ipcMain.handle('snc:backupList',()=>dataBackup.list());
+  ipcMain.handle('snc:backupCreate',async(_e,mode)=>{
+    if(mode==='local')return dataBackup.create({mode});
+    if(mode!=='export')throw Error('备份类型无效');
+    const chosen=await dialog.showSaveDialog(mainWindow,{defaultPath:path.join(app.getPath('downloads'),'wickrunAI-backup.json'),filters:[{name:'wickrunAI 备份',extensions:['json']}]});
+    if(chosen.canceled||!chosen.filePath)return null;
+    const result=dataBackup.create({mode:'export'});require('node:fs').writeFileSync(chosen.filePath,result.bundle,{mode:0o600});const {bundle,...summary}=result;return {...summary,path:chosen.filePath};
+  });
+  ipcMain.handle('snc:backupPreview',async(_e,id)=>{
+    if(id)return {input:{id},summary:dataBackup.preview({id})};
+    const chosen=await dialog.showOpenDialog(mainWindow,{properties:['openFile'],filters:[{name:'wickrunAI 备份',extensions:['json']}]});
+    if(chosen.canceled||!chosen.filePaths[0])return null;
+    const fs=require('node:fs'),file=chosen.filePaths[0];if(fs.statSync(file).size>dataBackup.status().limits.bundleBytes)throw Error('备份文件超过大小限制');
+    const bundle=fs.readFileSync(file,'utf8'),summary=dataBackup.preview({bundle}),token=require('node:crypto').randomUUID();importedBackups.clear();importedBackups.set(token,bundle);return {input:{token},summary};
+  });
+  ipcMain.handle('snc:backupRestore',(_e,input)=>{
+    if(inflight.size||activeToolControllers.size||localClients?.busy())throw Error('还有模型或工具操作正在结束，请等待完成后恢复');
+    const source=input?.id?{id:input.id}:input?.token&&importedBackups.has(input.token)?{bundle:importedBackups.get(input.token)}:null;if(!source)throw Error('请先预览要恢复的备份');
+    restoringData=true;try{dataBackup.restore(source);app.relaunch();app.exit(0);}catch(error){restoringData=false;throw error;}
+  });
+  ipcMain.handle('snc:toolAbort',(_e,runId)=>{localClients?.abort(runId);for(const rec of activeToolControllers.values())if(rec.runId===runId||rec.teamRunId===runId)rec.controller.abort();});
+  const collaboration = require('./collaboration-store.cjs').createCollaborationStore(app.getPath('userData'));
+  const teamFiles = require('./team-files.cjs').createTeamFiles(app.getPath('userData'));
+  try{if(!dataBackup.recoveryError)localClients=require('./local-clients.cjs').createLocalClients({userData:app.getPath('userData'),collaboration,teamFiles,getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),openExternal:url=>shell.openExternal(url)});}catch(error){storageStartupError=String(error);}
+  ipcMain.handle('snc:pickClientBinary',async()=>{const chosen=await dialog.showOpenDialog(mainWindow,{title:'选择官方原生客户端',properties:['openFile'],...(process.platform==='win32'?{filters:[{name:'原生程序',extensions:['exe']}]}:{})});return chosen.canceled?null:chosen.filePaths[0];});
+  ipcMain.handle('snc:clientCheck',(_e,kind)=>{dataAvailable();if(!['codex','claude'].includes(kind))throw Error('未知客户端');return localClients.check(kind);});
+  ipcMain.handle('snc:clientLogin',()=>{dataAvailable();return localClients.login();});
+  ipcMain.handle('snc:clientRun',(_e,args)=>{dataAvailable();return localClients.run(args);});
+  ipcMain.handle('snc:clientApprove',(_e,{id,approved})=>localClients.approve(id,approved));
+  ipcMain.handle('snc:teamFilesCreate', (_e,args) => { dataAvailable();return require('./team-execution-guard.cjs').createTeamExecutionGuard({collaboration,teamFiles}).createFileSession(args); });
+  ipcMain.handle('snc:teamFilesDiff', (_e,id) => {dataAvailable();return teamFiles.diff(id);});
+  ipcMain.handle('snc:teamFilesRecover', (_e,id) => {dataAvailable();return teamFiles.recover(id);});
+  ipcMain.handle('snc:teamFilesPreview', (_e,{id,path}) => teamFiles.preview(id,path));
+  ipcMain.handle('snc:teamFilesMerge', (_e,{id,files}) => {dataAvailable();return teamFiles.merge(id,files);});
+  ipcMain.handle('snc:teamFilesList', () => teamFiles.list());
+  ipcMain.handle('snc:collaborationRead', () => {dataAvailable();return collaboration.read();});
+  ipcMain.handle('snc:collaborationUpdate', (_e, {revision,project}) => {dataAvailable();return collaboration.update(revision,project);});
+  ipcMain.handle('snc:collaborationClaim', (_e, {projectId,runId}) => {dataAvailable();return collaboration.claim(projectId,runId);});
+  ipcMain.handle('snc:runSave', (_e, record) => {dataAvailable();return runtimeStore().save(record);});
+  ipcMain.handle('snc:runList', () => {dataAvailable();return runtimeStore().list();});
+  ipcMain.handle('snc:runRemove', (_e, id) => {dataAvailable();return runtimeStore().remove(id);});
   ipcMain.handle('snc:exchanges', (_e, runId) => runtimeStore().exchanges(runId));
   ipcMain.handle('snc:saveAnalysisExport', async (_e,{name,bytes}) => {
     if (!(bytes instanceof Uint8Array) || bytes.length > 32*1024*1024 || bytes.length < 22 || !/^wickrunAI-[a-z-]+-\d{4}-\d{2}-\d{2}\.zip$/.test(name)) throw new Error('分析导出包无效');
@@ -325,13 +376,21 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('snc:tool', (_e, { name, args, ctx }) => runTool(name, args, ctx));
+  ipcMain.handle('snc:tool', async (_e, { name, args, ctx }) => {
+    dataAvailable();
+    if(ctx?.teamExecution){
+      ctx=require('./team-execution-guard.cjs').createTeamExecutionGuard({collaboration,teamFiles}).tool(name,ctx);
+    }
+    const id=require('node:crypto').randomUUID(),controller=new AbortController();
+    activeToolControllers.set(id,{controller,runId:ctx?.execution?.runId,teamRunId:ctx?.teamExecution?.runId});
+    try{return await runTool(name,args,{...ctx,signal:controller.signal});}finally{activeToolControllers.delete(id);}
+  });
 
-  ipcMain.handle('snc:kvGet', (_e, key) => store.kvGet(key));
-  ipcMain.handle('snc:kvSet', (_e, { key, value }) => store.kvSet(key, value));
-  ipcMain.handle('snc:secretGet', (_e, id) => store.secretGet(id));
-  ipcMain.handle('snc:secretSet', (_e, { id, value }) => store.secretSet(id, value));
-  ipcMain.handle('snc:secretDelete', (_e, id) => store.secretDelete(id));
+  ipcMain.handle('snc:kvGet', (_e, key) => {dataAvailable();return store.kvGet(key);});
+  ipcMain.handle('snc:kvSet', (_e, { key, value }) => {dataAvailable();return store.kvSet(key, value);});
+  ipcMain.handle('snc:secretGet', (_e, id) => {dataAvailable();return store.secretGet(id);});
+  ipcMain.handle('snc:secretSet', (_e, { id, value }) => {dataAvailable();return store.secretSet(id, value);});
+  ipcMain.handle('snc:secretDelete', (_e, id) => {dataAvailable();return store.secretDelete(id);});
 
   ipcMain.handle('snc:info', () => ({
     encryptionAvailable: store.encryptionAvailable(),
@@ -401,7 +460,7 @@ function registerIpc() {
   ipcMain.handle('snc:chromeStatus', (_e, port) => chromeLaunch.status(port));
 
   ipcMain.handle('snc:remoteStart', async (_e, { port, token }) => {
-    const t = token || remote.newToken();
+    dataAvailable();const t = token || remote.newToken();
     store.kvSet('snc:remote:token', t);
     return remote.start(port, t);
   });
@@ -440,6 +499,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    localClients?.close();
     for (const [, rec] of inflight) {
       clearTimeout(rec.timer);
       rec.controller.abort('quit');

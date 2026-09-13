@@ -19,6 +19,12 @@
 
 使用前需要准备模型服务商的 API Key。模型调用费用由服务商收取。项目另有 Android 客户端，可通过局域网连接电脑；目前尚未完成真机验证。
 
+## 2.0 协作空间
+
+从顶部“单一 Agent ⇄ 协作空间”进入项目团队：配置成员、任务目标、工作流、隔离文件与交付验收。工作流支持拖动节点、连接分支、有限循环、版本保存和中断恢复；项目记录、草稿和检查点保存在本机。项目设置提供数据备份与恢复。
+
+本机 Codex / Claude Code 适配器已接入，实际调用需要官方客户端及有效登录；原生权限与 API 工具白名单存在差异。项目经验目前由用户提供验证证据并决定采用，自动 RSI 实验尚未实现。完整变更见 [2.0.0 说明](docs/releases/v2.0.0.md)。
+
 ## 可以做什么
 
 | 用途 | 使用方式 |
@@ -88,7 +94,7 @@ npm run dist:win
 
 桌面端使用 Electron 34，界面使用 React 19、Vite 和 TypeScript；Android 端使用 Capacitor 7。开发资料见 [架构说明](docs/ARCHITECTURE.md) 和 [贡献指南](CONTRIBUTING.md)。
 
-源码版本为 1.3.4，已发布版本以 [Releases](https://github.com/lifishard/wickrunAI/releases) 为准。目前 Android 真机运行、部分服务商的思考参数映射仍需验证。图片附件需要支持图片输入的模型。
+源码版本为 2.0.0，已发布版本以 [Releases](https://github.com/lifishard/wickrunAI/releases) 为准。目前 Android 真机运行、部分服务商的思考参数映射仍需验证。图片附件需要支持图片输入的模型。
 
 遇到问题，请在 [Issues](https://github.com/lifishard/wickrunAI/issues) 中提供应用版本、系统、端点、模型 ID 和复现步骤。附上日志或请求预览前，请删除 API Key 和私人内容。
 

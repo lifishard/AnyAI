@@ -32,7 +32,7 @@ test('release requires all eight platform packages with valid headers',async t=>
 });
 
 test('release tag push is repeatable and cannot replace a different commit',async t=>{
-  const {releaseTag}=await import('../scripts/release-tag.mjs');
+  const {releaseTag,checkReleaseTag}=await import('../scripts/release-tag.mjs');
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'anyai-release-git-'));
   t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const remote=path.join(dir,'remote.git'),repo=path.join(dir,'repo');
@@ -43,6 +43,9 @@ test('release tag push is repeatable and cannot replace a different commit',asyn
   git(['commit','--allow-empty','-m','initial'],repo);
   assert.equal(releaseTag(repo,'1.3.1').alreadyPushed,false);
   assert.equal(releaseTag(repo,'1.3.1').alreadyPushed,true);
+  assert.throws(()=>checkReleaseTag(repo,'1.3.1',true),/不能覆盖/);
+  assert.equal(checkReleaseTag(repo,'2.0.0',true).tag,'v2.0.0');
+  assert.equal(git(['tag','--list','v2.0.0'],repo),'');
   const original=git(['rev-parse','refs/tags/v1.3.1^{}'],remote);
   git(['commit','--allow-empty','-m','new'],repo);
   assert.throws(()=>releaseTag(repo,'1.3.1'),/不能覆盖/);

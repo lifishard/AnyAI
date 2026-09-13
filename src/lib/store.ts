@@ -28,7 +28,7 @@ export function defaultToolConfig(): ToolConfig {
     searxngUrl: '',
     chromePort: 9222,
     claudeBin: '',
-    claudeExtraArgs: '--permission-mode acceptEdits',
+    claudeExtraArgs: '',
     claudeTimeoutMs: 600000,
     toolTimeoutMs: 120000,
   };
@@ -82,6 +82,7 @@ export async function loadSettings(): Promise<AppSettings> {
     const raw = await getTransport().kvGet(K_SETTINGS);
     if (!raw) return defaultSettings();
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || (parsed.schemaVersion ?? 1) > 2) throw new Error("设置格式不兼容，请使用兼容版本");
     const merged: AppSettings = { ...defaultSettings(), ...parsed };
     merged.defaultConfig = mergeParamDefaults(
       (parsed.defaultConfig ?? defaultGenerationConfig()) as GenerationConfig,
@@ -93,6 +94,7 @@ export async function loadSettings(): Promise<AppSettings> {
     merged.customModels = parsed.customModels ?? {};
     merged.cachedModels = parsed.cachedModels ?? {};
     merged.tools = { ...defaultToolConfig(), ...(parsed.tools ?? {}) };
+    if(merged.tools.claudeExtraArgs.trim()==='--permission-mode acceptEdits')merged.tools.claudeExtraArgs='';
     merged.remote = { enabled: false, url: '', token: '', ...(parsed.remote ?? {}) };
     merged.skillSync = { dir: '', auto: false, ...(parsed.skillSync ?? {}) };
     /*
@@ -135,8 +137,8 @@ export async function loadSettings(): Promise<AppSettings> {
       ];
     }
     return merged;
-  } catch {
-    return defaultSettings();
+  } catch (error) {
+    throw new Error(`设置读取失败：${String(error)}`);
   }
 }
 
@@ -149,7 +151,7 @@ export async function loadConversations(): Promise<Conversation[]> {
     const raw = await getTransport().kvGet(K_CONVS);
     if (!raw) return [];
     const list = JSON.parse(raw) as Conversation[];
-    if (!Array.isArray(list)) return [];
+    if (!Array.isArray(list)) throw new Error("会话格式无效");
 
     /*
      * 每条会话都拷了一份自己的 config，所以那顶 max_tokens 天花板也拷进去了。
@@ -178,16 +180,16 @@ export async function loadConversations(): Promise<Conversation[]> {
         messages: (c.messages ?? []).map((m) => ({ ...m, pending: false })),
       };
     });
-  } catch {
-    return [];
+  } catch (error) {
+    throw new Error(`会话读取失败：${String(error)}`);
   }
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
-export function saveConversationsDebounced(list: Conversation[]): void {
+export function saveConversationsDebounced(list: Conversation[], onError?: (error: unknown) => void): void {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    void getTransport().kvSet(K_CONVS, JSON.stringify(list));
+    void getTransport().kvSet(K_CONVS, JSON.stringify(list)).catch(error => onError?.(error));
   }, 400);
 }
 

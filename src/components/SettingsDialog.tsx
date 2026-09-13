@@ -1,4 +1,5 @@
 import React from 'react';
+import LocalClientsPanel from './collaboration/LocalClientsPanel';
 import type { AppSettings, KeyProfile, SearchProvider } from '../types';
 import { BASE_URL_PRESETS, normalizeBaseUrl } from '../lib/api';
 import { secretDelete, secretGet, secretSet, uid } from '../lib/store';
@@ -932,7 +933,7 @@ export default function SettingsDialog(props: {
         ))}
       </div>
       <div className="modal-body">
-        {tab === 'keys' ? KeysTab() : null}
+        {tab === 'keys' ? <>{KeysTab()}<LocalClientsPanel settings={s} onChange={props.onChange}/></> : null}
         {tab === 'tools' ? ToolsTab() : null}
         {tab === 'effort' ? EffortTab() : null}
         {tab === 'remote' ? <RemoteTab settings={s} onChange={props.onChange} /> : null}

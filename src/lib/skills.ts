@@ -114,9 +114,10 @@ export async function loadSkills(): Promise<Skill[]> {
     const raw = await getTransport().kvGet(K_SKILLS);
     if (!raw) return [];
     const list = JSON.parse(raw);
-    return Array.isArray(list) ? (list as Skill[]) : [];
-  } catch {
-    return [];
+    if (!Array.isArray(list)) throw new Error("记录格式无效");
+    return list as Skill[];
+  } catch (error) {
+    throw new Error(`Skill 数据读取失败：${String(error)}`);
   }
 }
 

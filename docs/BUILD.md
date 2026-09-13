@@ -32,7 +32,7 @@ npm run dist:win     # 或 dist:mac / dist:linux
 ```
 
 Windows 上双击 **`打包桌面版.bat`** 是同一件事的无命令行版本：装依赖 → 类型检查 → 打包 →
-打开 `release/<当前版本>` 文件夹。版本直接读取 `package.json`，不会额外生成 1.0 包。
+自动打开当前版本的安装向导。按向导完成安装即可；安装包也保存在 `release/<当前版本>`。版本直接读取 `package.json`，不会额外生成 1.0 包。
 
 产物：
 
@@ -45,14 +45,19 @@ Windows 上双击 **`打包桌面版.bat`** 是同一件事的无命令行版本
 
 双击“同步到github.bat”会检查、提交并推送。只想检查可运行 `npm run sync:check`，不改动暂存区、不提交、不推送。密钥扫描只显示文件、行号和类型；测试用模拟密钥在运行时构造，扫描仍生效。此前提交成功但推送失败时，再运行脚本会继续推送已有提交。
 
-### 那两个 .bat 为什么一个中文都没有
+### 三个批处理入口
 
-cmd.exe 按**字节偏移**逐行读批处理文件。`chcp 65001` 之后偏移量和多字节字符的实际长度对不上，
-从那行起整个文件会被切错位 —— 表现就是 echo 的中文被拆成一截一截当命令执行
-（`'js:' is not recognized...`）。
+请依次运行，并等待前一个窗口完成：
 
-所以那两个 bat 是纯 ASCII 的薄壳，真正的逻辑在 `scripts/build-desktop.mjs`，中文提示由 Node 输出。
-macOS / Linux 直接 `node scripts/build-desktop.mjs`。
+1. **打包桌面版.bat**：构建当前 Windows 安装包，并打开安装向导。
+2. **同步到github.bat**：检查、提交本地修改并推送当前分支。
+3. **发布三平台版本.bat**：再次检查，同步遗漏修改，推送 `v<当前版本>` 标签；GitHub Actions 自动构建 Windows、macOS、Linux，核对八个安装包后公开 Release。
+
+三个入口都会切到仓库目录、保留退出码并停留显示结果。第三个入口本身也会同步，因此第二步已经做过时不会重复提交。版本从 `package.json` 读取，并核对锁文件；已经发布的标签不能被新代码覆盖。
+
+本次正式版本为 **2.0.0**。发布依赖本机可用的 GitHub 推送身份、网络和仓库 Actions；点击第三个入口表示开始云端构建，不表示三平台已经构建完成。失败时保留本地文件，修复后可重试。
+
+批处理使用 ASCII 薄壳，中文提示由 Node 输出。需要只验证本地打包且不安装、不清理旧包或打开窗口，可运行 `node scripts/build-desktop.mjs --no-install --no-cleanup --no-open`。只检查发布前条件可运行 `node scripts/sync-github.mjs --release --check-only`。
 
 ## 两个 Windows 上常见的打包失败
 

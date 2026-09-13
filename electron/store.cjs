@@ -11,7 +11,8 @@ const path = require('node:path');
 const { app, safeStorage } = require('electron');
 
 let filePath = null;
-let cache = null;
+let document = null;
+const { createDurableJson } = require('./durable-json.cjs');
 
 /**
  * 应用改名（SenseNova Chat → AnyAI）会让 app.getPath('userData') 指向新目录，
@@ -34,7 +35,7 @@ function migrateFromLegacy(target) {
       console.log(`[store] 已从旧目录迁移配置：${candidate} → ${target}`);
       return;
     } catch (err) {
-      console.error('[store] 迁移失败:', err);
+      throw new Error(`旧数据迁移失败，已停止写入：${err.message}`);
     }
   }
 }
@@ -69,52 +70,27 @@ function migrateChromeProfile(userDataDir) {
 function file() {
   if (!filePath) {
     const dir = app.getPath('userData');
-    filePath = path.join(dir, 'store.json');
-    try {
-      migrateFromLegacy(filePath);
-      migrateChromeProfile(dir);
-    } catch (err) {
-      console.error('[store] 迁移检查失败:', err);
-    }
+    const target = path.join(dir, 'store.json');
+    migrateFromLegacy(target);
+    migrateChromeProfile(dir);
+    filePath = target;
   }
   return filePath;
 }
 
 function read() {
-  if (cache) return cache;
-  try {
-    const raw = fs.readFileSync(file(), 'utf8');
-    cache = JSON.parse(raw);
-  } catch {
-    cache = { kv: {}, secrets: {} };
-  }
-  if (!cache.kv) cache.kv = {};
-  if (!cache.secrets) cache.secrets = {};
-  return cache;
+  return doc().read();
 }
-
-let writeTimer = null;
-function scheduleWrite() {
-  if (writeTimer) clearTimeout(writeTimer);
-  writeTimer = setTimeout(flush, 250);
+function doc() {
+  if (!document) document = createDurableJson(file(), {
+    initial: () => ({ kv: {}, secrets: {} }),
+    validate(value) {
+      if (!value || !value.kv || !value.secrets || Array.isArray(value.kv) || Array.isArray(value.secrets) || typeof value.kv !== 'object' || typeof value.secrets !== 'object') throw new Error('存储结构不兼容');
+    },
+  });
+  return document;
 }
-
-function flush() {
-  if (writeTimer) {
-    clearTimeout(writeTimer);
-    writeTimer = null;
-  }
-  if (!cache) return;
-  try {
-    const dir = path.dirname(file());
-    fs.mkdirSync(dir, { recursive: true });
-    const tmp = `${file()}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(cache), { mode: 0o600 });
-    fs.renameSync(tmp, file());
-  } catch (err) {
-    console.error('[store] 写入失败:', err);
-  }
-}
+function flush() { /* Mutations now complete durable writes before returning. */ }
 
 function encryptionAvailable() {
   try {
@@ -130,8 +106,7 @@ module.exports = {
     return v === undefined ? null : v;
   },
   kvSet(key, value) {
-    read().kv[key] = value;
-    scheduleWrite();
+    doc().update((data) => { data.kv[key] = value; });
   },
   secretGet(id) {
     const rec = read().secrets[id];
@@ -140,24 +115,19 @@ module.exports = {
       try {
         return safeStorage.decryptString(Buffer.from(rec.v, 'base64'));
       } catch (err) {
-        console.error('[store] 解密失败:', err);
-        return null;
+        throw new Error(`凭据无法解锁，原加密数据已保留：${err.message}`);
       }
     }
     return rec.v;
   },
   secretSet(id, value) {
-    const s = read().secrets;
-    if (encryptionAvailable()) {
-      s[id] = { enc: true, v: safeStorage.encryptString(value).toString('base64') };
-    } else {
-      s[id] = { enc: false, v: value };
-    }
-    scheduleWrite();
+    const rec = encryptionAvailable()
+      ? { enc: true, v: safeStorage.encryptString(value).toString('base64') }
+      : { enc: false, v: value };
+    doc().update((data) => { data.secrets[id] = rec; });
   },
   secretDelete(id) {
-    delete read().secrets[id];
-    scheduleWrite();
+    doc().update((data) => { delete data.secrets[id]; });
   },
   encryptionAvailable,
   flush,
