@@ -40,6 +40,7 @@ import { filePathsInText } from './artifacts';
 import { endExchange } from './wiretap';
 import { calibratedTokens, capabilities, observeInput, outputReserve, prepareBody, quotaKey, routeKey, snapshot, workingBudget, RUNTIME_VERSION } from './adaptive';
 import { compressionCandidate, memoryInstructions, memoryView, readContext, updatePlan, validateCompaction } from './context-memory';
+import { handoffInfo, repeatedWithoutProgress, type ConversationMemory } from './handoff';
 import { deliveryReport, recoveryInfo, updateRequirements, verifyRequirements } from './delivery';
 
 export interface AgentEvents {
@@ -104,6 +105,8 @@ export interface RunAgentArgs {
    * 它包含了之前所有的工具往返，那才是续跑的意义。
    */
   resume?: RunState;
+  conversationMemory?: ConversationMemory;
+  previousModel?: string;
   resolveUncertain?: 'skip' | 'retry';
   /** 危险工具执行前的确认。返回 false 表示拒绝 */
   confirm(step: ToolStep): Promise<boolean>;
@@ -134,11 +137,8 @@ function toWire(
   const latestUser = [...msgs].reverse().find((m) => m.role === 'user' && m.quoteOnly);
   if (latestUser) msgs = msgs.slice(msgs.indexOf(latestUser));
 
-  if (cfg.historyLimit > 0 && msgs.length > cfg.historyLimit) {
-    // 从后往前截，但不能把 tool 消息和它对应的 assistant 拆开
-    msgs = msgs.slice(-cfg.historyLimit);
-    while (msgs.length && msgs[0].role === 'tool') msgs.shift();
-  }
+  // Token budgeting and sourced summaries preserve task continuity. Legacy message-count
+  // limits must never silently discard the goal or handoff after changing models.
 
   const out: WireMessage[] = [];
 
@@ -285,10 +285,10 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
   const copyMessage = (m: ChatMessage): ChatMessage => ({
     id: m.id, role: m.role, content: m.content, createdAt: m.createdAt,
     toolCalls: m.toolCalls, toolCallId: m.toolCallId, toolName: m.toolName,
-    attachments: m.attachments, quotes: m.quotes, quoteOnly: m.quoteOnly,
+    attachments: m.attachments, quotes: m.quotes, quoteOnly: m.quoteOnly, contextKind: m.contextKind,
   });
   const resume = args.resume;
-  const originalWorking = resume?.working ?? args.history;
+  const originalWorking = resume?.working ?? args.conversationMemory?.history ?? args.history;
   let quoteBoundary = -1;
   originalWorking.forEach((m,i) => { if (m.role === 'user' && m.quoteOnly) quoteBoundary = i; });
   const scopedWorking = quoteBoundary > 0 ? originalWorking.slice(quoteBoundary) : originalWorking;
@@ -306,11 +306,18 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     runtimeVersion: RUNTIME_VERSION, milestones: structuredClone(resume?.milestones ?? []),
     compactions: quoteBoundary > 0 ? [] : structuredClone(resume?.compactions ?? []), requestStats: [...(resume?.requestStats ?? [])],
     requirements: structuredClone(resume?.requirements ?? []),
-    requirementSourceIds: [...new Set([...(resume?.requirementSourceIds ?? []),...args.history.filter(m => m.role === 'user').map(m => m.id)])].filter(id => scopedWorking.some(m => m.id === id)),
+    requirementSourceIds: [...new Set([...(resume?.requirementSourceIds ?? []),...args.history.filter(m => m.role === 'user').map(m => m.id),...args.history.flatMap(m=>m.supplementalInputs?.map(s=>s.id)??[])])].filter(id => scopedWorking.some(m => m.id === id)),
     recovery: undefined,
     attemptId: args.requestId, attemptStartedAt: Date.now(),
     isResumedAttempt: Boolean(resume), waitKind:undefined,
+    contextArchive: quoteBoundary > 0 ? [] : (resume?.contextArchive ?? args.conversationMemory?.archive ?? []).map(copyMessage),
+    contextArchiveSteps: quoteBoundary > 0 ? [] : structuredClone(resume?.contextArchiveSteps ?? args.conversationMemory?.evidence ?? []),
+    lastModel:cfg.model,
   };
+  if(resume || args.conversationMemory?.checkpoints){
+    state.handoff=handoffInfo(state,resume?.lastModel??args.previousModel??args.conversationMemory?.fromModel,cfg.model,
+      resume?'resume':'followup',resume?resume.handoff?.checkpoints??0:args.conversationMemory?.checkpoints??0);
+  }
   // Legacy snapshots did not store a tool cursor. Recover the unreturned calls as a batch.
   if (resume && !resume.version) {
     const last = [...state.working].reverse().find((m) => m.toolCalls?.length);
@@ -406,7 +413,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     try {
       const usable = new Set(availableTools(args.canRunHostTools).map((t) => t.name));
       const toolNames = cfg.toolsEnabled ? [...new Set([...cfg.enabledTools,
-        'read_context', ...(cfg.runtime?.milestones === false && !state.milestones?.length && !state.requirements?.length ? [] : ['update_plan','update_requirements','verify_requirements'])])].filter((n) => usable.has(n) && TOOL_BY_NAME[n]) : [];
+        'read_context', 'read_tool_result', ...(cfg.runtime?.milestones === false && !state.milestones?.length && !state.requirements?.length ? [] : ['update_plan','update_requirements','verify_requirements'])])].filter((n) => usable.has(n) && TOOL_BY_NAME[n]) : [];
       if (cfg.toolsEnabled && !toolNames.length) {
         await finishPause('工具开关已开启，但没有可用工具', { ...pauseInfo('没有可用工具'), kind: 'tools_unsupported', fixes: ['在配置中选择至少一个当前平台可用的工具'] });
         return;
@@ -418,7 +425,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
         control.abort(); void transport.abort(requestId); return false;
       };
       const compact = async (target: number): Promise<boolean> => {
-        if (cfg.runtime?.semanticCompression === false || compressionFailedAt === state.working.length) return false;
+        if (!toolNames.includes('read_context') || cfg.runtime?.semanticCompression === false || compressionFailedAt === state.working.length) return false;
         const cap = capabilities(args.profile, cfg, args.limitOf?.(), args.modelInfo);
         const candidate = compressionCandidate(state, Math.max(1024, target-10000));
         if (!candidate) return false;
@@ -500,6 +507,14 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('参数必须是对象');
               parsed = value as Record<string, unknown>;
             } catch (e) { parseError = e instanceof Error ? e.message : String(e); }
+            if (!parseError && !state.replanPending && repeatedWithoutProgress(state,call.name,parsed)) {
+              const blocked:ToolStep={id:`step-${state.runId}-${state.round}-${i}`,callId:call.id,name:call.name,args:parsed,
+                status:'denied',summary:'重复操作已暂停',output:'此操作未执行：连续相同操作没有新结果，请改用已有证据或调整方法。',startedAt:Date.now()};
+              state.steps!.push(blocked);events.onStep({...blocked});
+              state.working.push({id:uid('m'),role:'tool',toolCallId:call.id,toolName:call.name,content:blocked.output!,createdAt:Date.now()});
+              state.toolCursor=i+1;
+              await finishPause('连续三次相同操作返回相同结果，尚无新进展。已暂停以避免继续消耗；请补充信息、调整方法或切换模型后接着跑。'); return;
+            }
             const id = `step-${state.runId}-${state.round}-${i}`;
             const old = state.steps!.find((s) => s.id === id);
             const step: ToolStep = { id, callId: call.id, name: call.name, args: parsed,
@@ -628,14 +643,16 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           if (target < 1024 || (cap.otpm && outputAllowance > cap.otpm)) {
             await finishPause('所选输出／思考预算无法放入当前窗口或整分钟额度，请核对路由配置；等待不会解决'); return;
           }
-          let view = contextView(memoryView(state), state.steps!, Math.max(1024, target-3000),toolNames.includes('read_context'));
-          const extra = (state.extraSystem ?? args.extraSystem)+(toolNames.length ? memoryInstructions(state,toolNames.includes('update_plan')) : '');
+          const evidence=[...(state.contextArchiveSteps??[]),...state.steps!];
+          const readable=toolNames.includes('read_context');
+          let view = contextView(readable?memoryView(state):state.working, evidence, Math.max(1024, target-3000),readable);
+          const extra = (state.extraSystem ?? args.extraSystem)+memoryInstructions(state,!final&&toolNames.includes('update_plan'),!final&&readable);
           if (final) view = [...view, { id: 'wrap-up', role: 'user', content: '本阶段轮次已到。请如实汇总已完成与尚未完成的事项，不要声称未实际交付的文件已经生成。', createdAt: Date.now() }];
           const build = (v: ChatMessage[]) => prepareBody(buildRequestBody(cfg,toWire(v,cfg,!final && toolNames.length > 0,extra),final ? [] : toolNames,args.effortMappings),cfg,cap);
           let body = build(view);
           let bodyTokens = calibratedTokens(body,args.profile,cfg);
           if (bodyTokens > target) {
-            view = contextView(memoryView(state), state.steps!, Math.max(512, target-6000),toolNames.includes('read_context'));
+            view = contextView(readable?memoryView(state):state.working, evidence, Math.max(512, target-6000),readable);
             if (final) view = [...view, { id: 'wrap-up', role: 'user', content: '本阶段轮次已到。请如实汇总已完成与尚未完成的事项，不要声称未实际交付的文件已经生成。', createdAt: Date.now() }];
             body = build(view);
             bodyTokens = calibratedTokens(body,args.profile,cfg);
@@ -695,6 +712,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               }
             },
             onDispatch() {
+              if(state.handoff)state.handoff.status='sent';
               dispatched = true;
               stat.dispatchedAt = Date.now();
               state.status = 'running'; state.waitKind=undefined; state.nextRetryAt = undefined;

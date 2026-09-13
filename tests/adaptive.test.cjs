@@ -217,3 +217,51 @@ test('quota waits beyond the recovery budget pause before dispatch without prete
   const h=harness(async(_,e)=>{e.onPaceWait(20*60000);e.onError('aborted');});
   await h.finished;assert.equal(h.log.done,0);assert.match(h.log.reason,/自动等待上限/);assert.equal(h.log.states.at(-1).spentTokens,0);
 });
+
+test('model relay sends original goal and sourced summary despite legacy history limit, then retrieves original evidence',async()=>{
+  const state=longState();state.working=state.working.slice(0,7).map(m=>({...m,content:m.content.slice(0,300)}));state.steps=state.steps.slice(0,3);state.milestones=[];state.lastModel='model-a';
+  state.compactions=[memory.validateCompaction(JSON.stringify({facts:[{text:'SUMMARY_FROM_A',sources:['t0']}],decisions:[],unresolved:[],nextSteps:['Check source t0']}),state,4)];
+  let requests=0;
+  const h=harness(async(init,e)=>{e.onDispatch?.();const wire=JSON.stringify(init.body);assert.equal(init.body.model,'model-b');
+    assert.match(wire,/America\/Vancouver/);assert.match(wire,/SUMMARY_FROM_A/);
+    if(requests++===0)response(e,'',[{id:'source-read',name:'read_context',arguments:'{"id":"t0"}'}]);
+    else {assert.match(wire,/RAW_EVIDENCE_0/);response(e,'Checked original evidence');}
+  },{resume:state,config:{...cfg(),model:'model-b',historyLimit:1,enabledTools:['read_file'],runtime:{contextMode:'auto',maxMinutes:1,maxTokens:300000}},modelInfo:{id:'model-b',contextWindow:32768}});
+  await h.finished;assert.equal(h.log.done,1);assert.equal(requests,2);
+  const final=h.log.states.at(-1);assert.equal(final.handoff.fromModel,'model-a');assert.equal(final.handoff.status,'sent');assert.equal(final.contextSnapshot.contextWindow,32768);assert.equal(final.steps.length,4);
+});
+
+test('ordinary follow-up carries completed work and corrections across models without recounting prior tools',async()=>{
+  const relay=load(file('src/lib/handoff.ts')),state=longState();state.working=state.working.slice(0,3);state.steps=state.steps.slice(0,1);state.milestones=[];state.requirementSourceIds=['goal','correction'];state.status='completed';state.reasoning='PRIVATE_HIDDEN_THOUGHT';
+  const correction={id:'correction',content:'更正：日期必须为 2026-10-02',createdAt:2};state.working.push({...correction,role:'user'});
+  state.compactions=[memory.validateCompaction(JSON.stringify({facts:[{text:'SUMMARY_FROM_A',sources:['t0']}],decisions:[],unresolved:[],nextSteps:[]}),state,2)];
+  const answer={id:'answer-a',role:'assistant',content:'Saved prior result',createdAt:3,taskId:'task-a',supplementalInputs:[correction]};
+  const history=[state.working[0],answer,{id:'next',role:'user',content:'继续核查上一阶段结果',createdAt:4}];
+  const record={id:'task-a',answerId:'answer-a',question:history[0],config:{model:'model-a'},state};
+  const portable=relay.conversationMemory(history,()=>record);assert.equal(portable.checkpoints,1);assert.doesNotMatch(JSON.stringify(portable),/PRIVATE_HIDDEN_THOUGHT/);
+  let requests=0;const h=harness(async(init,e)=>{const wire=JSON.stringify(init.body);e.onDispatch?.();
+    assert.match(wire,/SUMMARY_FROM_A/);assert.match(wire,/2026-10-02/);assert.doesNotMatch(wire,/PRIVATE_HIDDEN_THOUGHT/);
+    if(requests++===0){assert.doesNotMatch(wire,/RAW_EVIDENCE_0/);response(e,'',[{id:'retrieve-old',name:'read_context',arguments:'{"id":"t0","limit":1000}'}]);}
+    else {assert.match(wire,/RAW_EVIDENCE_0/);response(e,'Verified using saved record');}
+  },{history,conversationMemory:portable,config:{...cfg(),model:'model-b',historyLimit:1,enabledTools:['read_file']}});
+  await h.finished;assert.equal(h.log.done,1);const final=h.log.states.at(-1);assert.equal(final.steps.length,1);assert.equal(final.contextArchiveSteps.length,1);assert.equal(final.handoff.mode,'followup');
+  const restored=JSON.parse(JSON.stringify(final));assert.match(memory.readContext(restored,{id:'t0'}).content,/RAW_EVIDENCE_0/);
+  const scoped=relay.conversationMemory([...history,{id:'quoted',role:'user',quoteOnly:true,content:'仅讨论选中内容',createdAt:5}],()=>record);
+  assert.equal(scoped.archive.length,0);assert.equal(scoped.checkpoints,0);
+  assert.equal(relay.conversationMemory(history.slice(1),()=>record).archive.length,0);
+  assert.equal(relay.conversationMemory([{...history[0],content:'Edited goal'},...history.slice(1)],()=>record).archive.length,0);
+});
+
+test('repeated identical retrieval stops without spending the entire round budget and can resume with another model',async()=>{
+  let requests=0;
+  const h=harness(async(_,e)=>response(e,'',[{id:`loop-${++requests}`,name:'read_context',arguments:'{"id":"goal"}'}]));
+  await h.finished;assert.equal(h.log.done,0);assert.equal(requests,4);assert.match(h.log.reason,/连续三次/);assert.equal(h.log.states.at(-1).steps.filter(s=>s.status==='ok').length,3);
+  const resumed=harness(async(_,e)=>response(e,'Use saved evidence and finish'),{requestId:'different-attempt',resume:h.log.states.at(-1),config:{...cfg(),model:'model-b',enabledTools:['read_file']}});
+  await resumed.finished;assert.equal(resumed.log.done,1);assert.equal(resumed.log.requests.length,1);assert.equal(resumed.log.states.at(-1).steps.length,4);
+});
+
+test('without retrieval, reduction retains full evidence instead of leaving unusable references',()=>{
+  const context=load(file('src/lib/task-context.ts')),state=longState();
+  const view=context.contextView(state.working,state.steps,1000,false);
+  assert.equal(JSON.stringify(view),JSON.stringify(state.working));
+});

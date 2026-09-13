@@ -21,8 +21,9 @@ import type {
 import { SEED_MODELS, buildHeaders, endpoint, fetchModels, previewBody } from './lib/api';
 import { PROBE_SPACING_MS, probe400, probeHistory, type ProbeStep } from './lib/probe400';
 import { formatExchange, failedExchange, exchangeOf, importExchanges } from './lib/wiretap';
-import { loadRuns, saveRun, recoverConversations, forgetRuns } from './lib/runs';
+import { loadRuns, saveRun, recoverConversations, forgetRuns, runRecord } from './lib/runs';
 import { localProgress } from './lib/task-context';
+import { conversationMemory } from './lib/handoff';
 import { capabilities, outputReserve, quotaKey, routeKey, workingBudget } from './lib/adaptive';
 import { addRunInput } from './lib/delivery';
 import { limitKey, mergeLearnedLimit, pacingFloor, estimateRequestTokens } from './lib/limits';
@@ -927,6 +928,8 @@ export default function App() {
         toolCtx: () => toolContextOf(settings, conv.projectId ?? null, grantsRef.current),
         effortMappings: settings.effortMappings,
         resume: resumeFrom,
+        previousModel: resumeAnswer?.model,
+        conversationMemory: resumeFrom ? undefined : conversationMemory(history, runRecord),
         resolveUncertain: resolution,
         // 这条路由的窗口有多大 —— 之前撞出来的那个数
         modelInfo: [...(settings.cachedModels[profile.id] ?? []), ...(settings.customModels[profile.id] ?? [])].find(m => m.id === cfg.model),
@@ -1012,7 +1015,7 @@ export default function App() {
                 title: nextConv.title, state });
             }
             patchMessage(convId, answerMsg.id, { runState: state ?? undefined,
-              ...(state ? { milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery, taskId:state.runId, supplementalInputs:state.supplementalInputs } : {}) });
+              ...(state ? { milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery, taskId:state.runId, supplementalInputs:state.supplementalInputs, handoff:state.handoff } : {}) });
           },
           onPaused(reason) {
             finishUi(); setQueuePaused(true);

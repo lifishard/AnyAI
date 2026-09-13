@@ -296,18 +296,7 @@ export default function ConfigPanel(props: {
           />
         </Field>
 
-        <Field
-          label="携带历史条数"
-          hint="0 = 带上全部历史。长对话把这个调小能显著省 token。"
-        >
-          <input
-            type="number"
-            min={0}
-            max={200}
-            value={cfg.historyLimit}
-            onChange={(e) => onChange({ historyLimit: Math.max(0, Number(e.target.value) || 0) })}
-          />
-        </Field>
+        <p className="hint">任务上下文按当前模型窗口自动整理，保留用户要求、总结和可检索的原始证据。切换模型后继续使用同一份任务记录；旧版“历史条数”限制已停用。</p>
       </div>
 
       {/* ---------------- 采样参数 ---------------- */}

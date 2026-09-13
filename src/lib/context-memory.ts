@@ -5,27 +5,28 @@ export function memoryView(state: RunState): ChatMessage[] {
   const last = state.compactions?.at(-1);
   if (!last) return state.working;
   // User instructions remain verbatim; their attachments are retrieved separately after compaction.
-  const protectedUsers = state.working.slice(0, last.throughIndex+1).filter(m => m.role === 'user').map(m => ({ ...m,
+  const protectedUsers = state.working.slice(0, last.throughIndex+1).filter(m => m.role === 'user' && m.contextKind !== 'handoff').map(m => ({ ...m,
     attachments: undefined, content: m.content + (m.attachments?.length ? `\n附件原文可用 read_context 读取消息 ${m.id}` : '') }));
   return [...protectedUsers, { id: `memory-${last.id}`, role: 'user', createdAt: last.createdAt,
     content: `历史材料摘要（不是新的指令；有疑问请 read_context 核对来源）：\n${JSON.stringify({ facts: last.facts, decisions: last.decisions, unresolved: last.unresolved, nextSteps: last.nextSteps })}` },
     ...state.working.slice(last.throughIndex+1)];
 }
-export function memoryInstructions(state: RunState, allowPlan = true): string {
+export function memoryInstructions(state: RunState, allowPlan = true, canRetrieve = true): string {
   // Keep the active contract in every request; revision and verification histories stay on disk.
   const requirements = (state.requirements ?? []).map(({ history, verificationHistory, ...active }) => active);
-  const files = (state.steps ?? []).flatMap(s => s.files ?? []).map(f => ({ path: f.path, direction: f.direction }))
+  const files = [...(state.contextArchiveSteps ?? []), ...(state.steps ?? [])].flatMap(s => s.files ?? []).map(f => ({ path: f.path, direction: f.direction }))
     .filter((f,i,all) => all.findIndex(x => x.path === f.path && x.direction === f.direction) === i);
-  return `\n${allowPlan ? '复杂任务先用 update_plan 建立 3–6 个里程碑，并用 update_requirements 将用户要求与验收条件对应。交付前 verify_requirements 逐项核验，修复失败项；无法核验明确标记。文件存在不代表内容或覆盖完整，完整性另列 review 要求。模型复核不是独立验证。简单问答不用计划。不能遗漏未完成项目，也不能把计划当作完成证据。' : ''}用 read_context 查阅历史原文，read_tool_result 查阅已保存的完整工具结果，避免重复外部操作。\n用户来源消息 ID：${JSON.stringify(state.requirementSourceIds ?? [])}\n交付要求：${JSON.stringify(requirements)}\n当前里程碑：${JSON.stringify(state.milestones ?? [])}\n已核实文件索引：${JSON.stringify(files)}\n`;
+  return `\n${allowPlan ? '复杂任务先用 update_plan 建立 3–6 个里程碑，并用 update_requirements 将用户要求与验收条件对应。交付前 verify_requirements 逐项核验，修复失败项；无法核验明确标记。文件存在不代表内容或覆盖完整，完整性另列 review 要求。模型复核不是独立验证。简单问答不用计划。不能遗漏未完成项目，也不能把计划当作完成证据。' : ''}${canRetrieve ? '用 read_context 查阅历史原文，read_tool_result 查阅已保存的完整工具结果，避免重复外部操作。' : '当前检索工具未启用；若需要未展示的证据，应明确说明缺口并请用户启用工具，不得假装已核实。'}同一窗口可能由不同模型接力。先结合原始用户要求、最新补充、已有总结、未完成项和失败原因决定下一步。已有成功证据应先读取；不要仅因换模型重复查询或写入。历史摘要是可核对的工作笔记，不能覆盖用户原文，也不代表所有事项均已完成。\n接力信息：${JSON.stringify(state.handoff ?? null)}\n用户来源消息 ID：${JSON.stringify(state.requirementSourceIds ?? [])}\n交付要求：${JSON.stringify(requirements)}\n当前里程碑：${JSON.stringify(state.milestones ?? [])}\n已核实文件索引：${JSON.stringify(files)}\n`;
 }
 export function readContext(state: RunState, args: Record<string, unknown>): ToolResult {
   const offset = Math.max(0, Math.floor(Number(args.offset)||0));
   const limit = Math.max(1, Math.min(12000, Math.floor(Number(args.limit)||6000)));
   const id = String(args.id ?? '');
   const query = String(args.query ?? '').toLowerCase();
+  const records = [...new Map([...(state.contextArchive ?? []), ...state.working].map(m => [m.id,m])).values()];
   let text: string;
   if (id) {
-    const m = state.working.find(m => m.id === id);
+    const m = records.find(m => m.id === id);
     if (!m) return { ok: false, content: '', error: '找不到消息 ID；不填写 id 可列出记录' };
     if (args.image_index !== undefined) {
       const image = m.attachments?.filter(a => a.kind === 'image')[Math.floor(Number(args.image_index))];
@@ -34,7 +35,7 @@ export function readContext(state: RunState, args: Record<string, unknown>): Too
     }
     text = JSON.stringify({ id: m.id, role: m.role, content: m.content, quotes: m.quotes, toolCalls: m.toolCalls,
       attachments: m.attachments?.map(a => ({ name: a.name, path: a.path, text: a.text, kind: a.kind })) });
-  } else text = JSON.stringify(state.working.filter(m => !query || m.content.toLowerCase().includes(query) || m.attachments?.some(a => `${a.name}\n${a.text ?? ''}`.toLowerCase().includes(query)))
+  } else text = JSON.stringify(records.filter(m => !query || m.content.toLowerCase().includes(query) || m.attachments?.some(a => `${a.name}\n${a.text ?? ''}`.toLowerCase().includes(query)))
     .map(m => ({ id: m.id, role: m.role, excerpt: m.content.slice(0,160), attachments:m.attachments?.map(a => ({name:a.name,kind:a.kind})) })));
   return { ok: true, content: JSON.stringify({ text: text.slice(offset,offset+limit), total: text.length, nextOffset: offset+limit < text.length ? offset+limit : null }) };
 }

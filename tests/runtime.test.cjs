@@ -93,7 +93,7 @@ test('file cards require actual files in allowed roots; ICS and input metadata p
 test('bounded working context preserves goals, source evidence and tool-call pairing', () => {
   const {contextView}=load(file('src/lib/task-context.ts')); const history=[{id:'goal',role:'user',content:'Complete all courses',createdAt:1}]; const steps=[];
   for(let i=0;i<5;i++) {history.push({id:'a'+i,role:'assistant',content:'',toolCalls:[{id:'c'+i,name:'read_file',arguments:'{}'}]}, {id:'t'+i,role:'tool',toolCallId:'c'+i,toolName:'read_file',content:'x'.repeat(20000)});steps.push({callId:'c'+i,status:'ok',summary:'course '+i,resultRef:'raw'+i});}
-  const view=contextView(history,steps,900);
+  const view=contextView(history,steps,900,true);
   assert.equal(history[2].content.length,20000); assert.equal(view[0].content,history[0].content);
   assert.match(JSON.stringify(view),/read_tool_result/);
   for(let i=0;i<view.length;i++) if(view[i].toolCalls) for(const c of view[i].toolCalls) assert.ok(view.slice(i+1).some(m=>m.role==='tool'&&m.toolCallId===c.id));

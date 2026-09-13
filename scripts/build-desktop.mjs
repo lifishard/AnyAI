@@ -8,8 +8,7 @@
  * echo 的中文被拆成一截一截当命令执行。所以 .bat 里一个非 ASCII 字符都不能有。
  *
  * 两个设计选择：
- *  1. 类型检查失败只警告不阻断 —— vite 用 esbuild 剥类型，本来就不做类型检查，
- *     类型错不影响产物能不能跑，卡住不给打包是帮倒忙。
+ *  1. 类型检查失败阻断打包，避免生成检查未通过的版本。
  *  2. NSIS 安装包打不出来时自动退到免安装版 —— Windows 上普通用户没有创建符号
  *     链接的权限，electron-builder 解压 winCodeSign（里面带着 macOS 的 .dylib
  *     软链）必挂。免安装版走不到那一步，照样能用。
@@ -19,9 +18,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import url from 'node:url';
+import { pruneReleases } from './release-retention.mjs';
 
 const root = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const isWin = process.platform === 'win32';
+const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('打包版本格式无效');
+const outputDir = `release/${version}`;
+const buildOptions = ['--publish', 'never', `--config.directories.output=${outputDir}`];
 
 const line = (s = '') => process.stdout.write(`${s}\n`);
 const rule = () => line('='.repeat(56));
@@ -99,7 +103,7 @@ if (!fs.existsSync(path.join(root, 'node_modules'))) {
 }
 line();
 
-/* ---------------- 2. 类型检查（只警告） ---------------- */
+/* ---------------- 2. 类型检查 ---------------- */
 
 line('[2/4] 类型检查…');
 const tc = runQuiet('npx', ['tsc', '--noEmit']);
@@ -112,8 +116,9 @@ if (tc.ok) {
   for (const e of errors.slice(0, 40)) line(`        ${e.trim()}`);
   if (errors.length > 40) line(`        …还有 ${errors.length - 40} 处`);
   line();
-  line('      这些不影响应用运行（打包用 esbuild，本来就不做类型检查），继续。');
-  line('      想修的话把上面这些贴给我。');
+  if (!errors.length) line(tc.out || '无法运行类型检查。');
+  line('      类型检查未通过，停止打包；现有安装包保留。');
+  process.exit(1);
 }
 line();
 
@@ -186,7 +191,7 @@ line();
 let installerOk = true;
 let usedFallback = false;
 
-const eb = await runTee('npx', ['electron-builder', platformFlag()]);
+const eb = await runTee('npx', ['electron-builder', platformFlag(), ...buildOptions]);
 
 if (!eb.ok) {
   installerOk = false;
@@ -220,7 +225,7 @@ if (!eb.ok) {
   }
   line();
 
-  const dirBuild = await runTee('npx', ['electron-builder', platformFlag(), '--dir']);
+  const dirBuild = await runTee('npx', ['electron-builder', platformFlag(), '--dir', ...buildOptions]);
   if (dirBuild.ok) {
     usedFallback = true;
   } else {
@@ -232,7 +237,11 @@ if (!eb.ok) {
 
 /* ---------------- 结果 ---------------- */
 
-const releaseDir = path.join(root, 'release');
+const releaseDir = path.join(root, outputDir);
+if (!usedFallback) {
+  try { const retention = pruneReleases(path.join(root, 'release'), version); line(`保留版本：${retention.keep.join('、')}；已清理 ${retention.remove.length-retention.skipped.length} 项旧产物。`); if(retention.skipped.length)line(`仍在运行的旧产物暂留：${retention.skipped.join('、')}`); }
+  catch (error) { line(`安装包已生成，旧产物清理未完成：${error.message}`); }
+}
 line();
 rule();
 line('  打包完成');
@@ -286,7 +295,7 @@ if (usedFallback) {
     .filter((f) => /\.(exe|dmg|AppImage|deb)$/i.test(f));
 
   if (installers.length) {
-    line('  产物在 release 文件夹里：');
+    line(`  本次 ${version} 产物：${releaseDir}`);
     line();
     for (const f of installers) {
       const size = (fs.statSync(path.join(releaseDir, f)).size / 1048576).toFixed(0);

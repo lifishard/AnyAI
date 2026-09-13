@@ -345,6 +345,14 @@ export default function AnswerBlock(props: {
         <RecoveryCard state={answer.runState} onResume={props.onResume} onAddInput={props.onResumeWithInput} onResolve={props.onResolveUncertain}/>
       ) : null}
 
+      {answer?.handoff ? <details className="reasoning">
+        <summary>接力上下文 · {answer.handoff.status === 'sent' ? '已发送' : '已准备'}</summary>
+        <div className="reasoning-body">
+          <p>{answer.handoff.fromModel ?? '此前模型'} → {answer.handoff.toModel} · {answer.handoff.mode === 'resume' ? '从原任务继续' : '承接同窗口历史'}</p>
+          <p>保留 {answer.handoff.sourceMessages} 条来源记录、{answer.handoff.savedSteps} 步执行证据，{answer.handoff.summaryAvailable ? '包含已有总结或交接记录' : '尚无语义总结，保留原始上下文'}。完整原文按需检索，未全部重复发送。</p>
+          <p>此处记录上下文交付状态；模型是否理解准确仍需看后续行动和验收结果。</p>
+        </div>
+      </details> : null}
       <MilestonePanel items={answer?.milestones ?? answer?.runState?.milestones} steps={answer?.steps ?? answer?.runState?.steps} />
       <DeliveryPanel report={answer?.delivery ?? answer?.runState?.delivery} visible={Boolean(answer && !answer.pending && (answer.milestones?.length || answer.delivery?.requirements.length || answer.steps?.length))}/>
       {answer?.progress ? <div className="saved-progress"><strong>已保存的进度</strong><div>{answer.progress}</div></div> : null}

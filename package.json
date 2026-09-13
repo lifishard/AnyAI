@@ -1,6 +1,6 @@
 {
   "name": "anyai",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "AnyAI — BYOK 多模型 Agent 桌面客户端（用你自己的 API Key）：联网查证、读写本地文件、控制 Chrome、调用 Claude Code",
   "private": true,
   "type": "module",
@@ -12,9 +12,9 @@
     "dev:electron": "concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env SNC_DEV_URL=http://localhost:5173 electron .\"",
     "build": "tsc --noEmit && vite build",
     "start:electron": "electron .",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:linux": "npm run build && electron-builder --linux",
+    "dist:win": "npm run build && node scripts/package-release.mjs --win",
+    "dist:mac": "npm run build && node scripts/package-release.mjs --mac",
+    "dist:linux": "npm run build && node scripts/package-release.mjs --linux",
     "cap:sync": "npm run build && cap sync android",
     "cap:add:android": "npm run build && cap add android && node scripts/install-android-plugin.mjs",
     "cap:patch": "node scripts/install-android-plugin.mjs",
@@ -26,9 +26,10 @@
     "check:lite": "node scripts/check-lite.mjs",
     "sync": "node scripts/sync-github.mjs",
     "build:fast": "vite build",
-    "dist:win:fast": "npm run build:fast && electron-builder --win",
+    "dist:win:fast": "npm run build:fast && node scripts/package-release.mjs --win",
     "init-repo": "node scripts/init-repo.mjs",
-    "release": "npm run build:fast && electron-builder --publish always"
+    "release": "npm run build:fast && electron-builder --publish always",
+    "sync:check": "node scripts/sync-github.mjs --check-only"
   },
   "dependencies": {
     "@capacitor/android": "^7.0.0",

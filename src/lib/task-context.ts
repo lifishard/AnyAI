@@ -16,6 +16,7 @@ export function runtimePolicy(cfg: GenerationConfig) {
 /** Build a bounded view; original records and on-disk results are never changed. */
 export function contextView(original: ChatMessage[], steps: ToolStep[], budget: number, canRetrieve = false): ChatMessage[] {
   const msgs: ChatMessage[] = original.map((m) => ({ ...m, attachments: m.attachments?.map((a) => ({ ...a })) }));
+  if (!canRetrieve) return msgs;
   const size = () => estimateChatTokens(msgs);
   if (canRetrieve) {
     for (const m of msgs) {
@@ -68,7 +69,7 @@ export function contextView(original: ChatMessage[], steps: ToolStep[], budget: 
   for (let i = 0; i < lastAssistant && size() > budget; i++) {
     const m = msgs[i];
     if (m.role === 'assistant' && !m.toolCalls?.length && m.content.length > 1000) {
-      m.content = `${m.content.slice(0, 600)}\n（较早回答已缩短，原文仍在对话记录。）`;
+      m.content = `${m.content.slice(0, 600)}\n（较早回答已缩短，原文可用 read_context(id="${m.id}") 读取。）`;
     }
   }
   return msgs;

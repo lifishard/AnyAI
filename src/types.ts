@@ -314,6 +314,8 @@ export interface Usage {
 }
 
 export interface ChatMessage {
+  contextKind?: 'handoff';
+  handoff?: HandoffInfo;
   id: string;
   role: Role;
   content: string;
@@ -375,6 +377,10 @@ export interface ChatMessage {
 
 /** 中断现场。够用来无缝续跑，也够小到能塞进 localStorage */
 export interface RunState {
+  contextArchive?: ChatMessage[];
+  contextArchiveSteps?: ToolStep[];
+  handoff?: HandoffInfo;
+  lastModel?: string;
   /** agent 内部的完整消息序列，含工具往返 */
   working: ChatMessage[];
   /** 停在第几轮 */
@@ -419,6 +425,18 @@ export interface RunState {
   replanPending?: boolean;
   pendingInputMessages?: ChatMessage[];
   waitKind?: 'quota' | 'approval';
+}
+
+export interface HandoffInfo {
+  fromModel?: string;
+  toModel: string;
+  mode: 'resume' | 'followup';
+  at: number;
+  status: 'prepared' | 'sent';
+  checkpoints: number;
+  sourceMessages: number;
+  savedSteps: number;
+  summaryAvailable: boolean;
 }
 
 export interface RunRecord {

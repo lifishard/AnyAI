@@ -78,7 +78,7 @@ export function recoverConversations(original: Conversation[], saved: RunRecord[
       model: r.config.model, pending: false, content: state.content ?? existing?.content ?? '',
       reasoning: state.reasoning ?? existing?.reasoning, steps: state.steps ?? existing?.steps,
       sources: state.sources, usage: state.usage, runState: completed ? undefined : recovered,
-      milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery ?? deliveryReport(state), taskId:r.id, supplementalInputs:state.supplementalInputs,
+      milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery ?? deliveryReport(state), taskId:r.id, supplementalInputs:state.supplementalInputs, handoff:state.handoff,
       progress: completed ? undefined : localProgress(state.steps ?? [], recovered.reason),
       artifacts: [...(existing?.artifacts ?? []), ...collectArtifacts(state.content ?? '', state.steps ?? [])]
         .filter((a, i, all) => all.findIndex((b) => b.path && a.path ? b.path === a.path && b.direction === a.direction : b.id === a.id) === i),

@@ -5,6 +5,9 @@ import type { LearnedLimit } from '../lib/limits';
 import { capabilities, prepareBody, snapshot } from '../lib/adaptive';
 import { buildRequestBody } from '../lib/paramSchema';
 import { buildWire } from '../lib/agent';
+import { conversationMemory } from '../lib/handoff';
+import { memoryInstructions } from '../lib/context-memory';
+import { runRecord } from '../lib/runs';
 
 export interface ContextPreview {
   profile: KeyProfile;
@@ -24,8 +27,11 @@ export default function ContextMeter({ preview, draft }: { preview: ContextPrevi
     if (preview.current) return { value: preview.current };
     try {
       const cap = capabilities(preview.profile,preview.config,preview.learned,preview.modelInfo);
-      const tools = preview.config.toolsEnabled ? [...new Set([...preview.toolNames,'read_context', ...(preview.config.runtime?.milestones === false ? [] : ['update_plan','update_requirements','verify_requirements'])])] : [];
-      const body = prepareBody(buildRequestBody(preview.config,buildWire([...preview.history,deferredDraft],preview.config,preview.extraSystem),tools,preview.mappings),preview.config,cap);
+      const tools = preview.config.toolsEnabled ? [...new Set([...preview.toolNames,'read_context', 'read_tool_result', ...(preview.config.runtime?.milestones === false ? [] : ['update_plan','update_requirements','verify_requirements'])])] : [];
+      const history=[...preview.history,deferredDraft],memory=conversationMemory(history,runRecord);
+      const extra=preview.extraSystem+memoryInstructions({working:memory.history,contextArchiveSteps:memory.evidence,round:1,at:0,stoppedBy:'unknown',
+        requirementSourceIds:history.filter(m=>m.role==='user').map(m=>m.id)},tools.includes('update_plan'),tools.includes('read_context'));
+      const body = prepareBody(buildRequestBody(preview.config,buildWire(memory.history,preview.config,extra),tools,preview.mappings),preview.config,cap);
       return { value:snapshot(body,preview.config,preview.profile,cap) };
     } catch (e) { return { error:e instanceof Error ? e.message : String(e) }; }
   },[preview,deferredDraft]);

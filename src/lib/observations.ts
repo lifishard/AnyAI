@@ -91,6 +91,10 @@ export function projectObservation(previous:TaskObservation|undefined,record:Run
     event(t,`state:${stageSource}:${t.nextSeq+1}`,'state_changed',at,attempt.id,{from:t.status,to:attempt.status,reason,errorKind:s.errorInfo?.kind??'none'});
   }
   t.status=attempt.status;t.lastAt=at;t.appVersion=appVersion;t.runtimeVersion=s.runtimeVersion ?? 'unknown';
+  if(s.handoff)event(t,`handoff:${stageSource}`,'context_handoff',s.handoff.at,attempt.id,{
+    mode:s.handoff.mode,status:s.handoff.status,modelChanged:Boolean(s.handoff.fromModel&&s.handoff.fromModel!==s.handoff.toModel),
+    sourceMessages:s.handoff.sourceMessages,savedSteps:s.handoff.savedSteps,checkpoints:s.handoff.checkpoints,summaryAvailable:s.handoff.summaryAvailable,
+  });
   const req=s.requirements ?? [], current=req.map(r=>r.verification?.revision===r.revision?r.verification:undefined);
   t.acceptance={coverage:req.length?'model_defined':'not_defined',total:req.length,passed:current.filter(v=>v?.status==='passed').length,failed:current.filter(v=>v?.status==='failed').length,
     unverifiable:current.filter(v=>v?.status==='unverifiable').length,unchecked:current.filter(v=>!v).length,program:current.filter(v=>v?.method==='program').length,model:current.filter(v=>v?.method==='model').length};
