@@ -1,4 +1,5 @@
 import React from 'react';
+import AnchoredPopover from './AnchoredPopover';
 import type { ChatMessage, ContextSnapshot, GenerationConfig, KeyProfile, ModelInfo } from '../types';
 import type { EffortMapping } from '../lib/effort';
 import type { LearnedLimit } from '../lib/limits';
@@ -22,6 +23,8 @@ export interface ContextPreview {
 }
 const n = (value: number) => value >= 10000 ? `${(value/1000).toFixed(1)}k` : value.toLocaleString();
 export default function ContextMeter({ preview, draft }: { preview: ContextPreview; draft: ChatMessage }) {
+  const [open, setOpen] = React.useState(false);
+  const anchorRef = React.useRef<HTMLDivElement>(null);
   const deferredDraft = React.useDeferredValue(draft);
   const result = React.useMemo(() => {
     if (preview.current) return { value: preview.current };
@@ -39,14 +42,14 @@ export default function ContextMeter({ preview, draft }: { preview: ContextPrevi
   const ratio = s?.contextWindow ? Math.min(100,s.inputTokens/s.contextWindow*100) : 0;
   const reserved = s?.contextWindow ? Math.min(100,ratio+s.outputReserve/s.contextWindow*100) : 0;
   const phase = s?.phase === 'waiting' ? '等待额度' : s?.phase === 'compacting' ? '整理中' : preview.current ? '本次请求' : '发送前估算';
-  return <details className="context-meter">
-    <summary aria-label="上下文用量" title="查看上下文用量与预算">
+  return <div className="context-meter" ref={anchorRef}>
+    <button type="button" aria-label="上下文用量" title="查看上下文用量与预算" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(v => !v)}>
       <span className="context-ring" style={{ background: `conic-gradient(var(--accent) ${ratio}%, var(--border-strong) ${ratio}% ${reserved}%, var(--bg-sunken) ${reserved}% 100%)` }}>
         <span>{s?.contextWindow ? `${Math.round(ratio)}%` : '?'}</span>
       </span>
       <span className="context-meter-label">{s ? n(s.inputTokens) : '配置待核对'}</span>
-    </summary>
-    <div className="context-popover">
+    </button>
+    {open ? <AnchoredPopover anchorRef={anchorRef} onClose={() => setOpen(false)} className="context-popover" label="上下文用量与预算" align="end">
       <strong>上下文 · {phase}</strong>
       {s ? <>
         <div className="context-total">约 {n(s.inputTokens)} <small>/ {s.contextWindow ? `${n(s.contextWindow)} token` : '窗口未知'}</small></div>
@@ -65,6 +68,6 @@ export default function ContextMeter({ preview, draft }: { preview: ContextPrevi
         </dl>
         <p className="hint">{s.source}。用量为发送前估算，实际计费以上游 usage 为准。分钟额度影响发送时间。</p>
       </> : <p className="hint">{result.error}</p>}
-    </div>
-  </details>;
+    </AnchoredPopover> : null}
+  </div>;
 }

@@ -20,10 +20,10 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
       - name: 验证产物运行对应原始版本标签
@@ -33,7 +33,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           SOURCE_RUN: ${{ inputs.run_id }}
         run: node scripts/verify-release-source.mjs
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: packages-*
           merge-multiple: true

@@ -11,9 +11,9 @@ jobs:
     name: 类型检查与构建
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -35,8 +35,7 @@ jobs:
         run: npm run check:lite
 
       # 这一步是拦截线：类型错在这里挡住，别流到 release 里去。
-      # 本地打包脚本对类型错只警告不阻断（vite 用 esbuild 剥类型，
-      # 类型错不影响能不能跑），但合进主干之前该修干净。
+      # 本地打包、CI 和发布流程均阻断类型错误。
       - name: 类型检查
         run: npm run typecheck
 

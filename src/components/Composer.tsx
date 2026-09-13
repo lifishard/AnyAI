@@ -1,4 +1,5 @@
 import React from 'react';
+import AnchoredPopover from './AnchoredPopover';
 import type {
   ApprovalMode,
   Attachment,
@@ -107,7 +108,8 @@ export default function Composer(props: {
   const [caret, setCaret] = React.useState(0);
   const [slashIndex, setSlashIndex] = React.useState(0);
   const ref = React.useRef<HTMLTextAreaElement>(null);
-  const barRef = React.useRef<HTMLDivElement>(null);
+  const plusRef = React.useRef<HTMLDivElement>(null);
+  const approvalRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => { if (props.quotes.length) ref.current?.focus(); }, [props.quotes.length]);
 
   /* ---- 斜杠唤起技能 ---- */
@@ -144,18 +146,6 @@ export default function Composer(props: {
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [text]);
-
-  React.useEffect(() => {
-    if (!plusOpen && !approvalOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (barRef.current && !barRef.current.contains(e.target as Node)) {
-        setPlusOpen(false);
-        setApprovalOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [plusOpen, approvalOpen]);
 
   function submit() {
     const t = text.trim();
@@ -360,12 +350,14 @@ export default function Composer(props: {
             onPaste={onPaste}
           />
 
-          <div className="composer-bar" ref={barRef}>
+          <div className="composer-bar">
             {/* ---- 左下角 ---- */}
-            <div className="menu-anchor">
+            <div className="menu-anchor" ref={plusRef}>
               <button
                 className="btn sm ghost"
                 title="添加文件、图片或工作目录"
+                aria-expanded={plusOpen}
+                aria-haspopup="dialog"
                 onClick={() => {
                   setPlusOpen((v) => !v);
                   setApprovalOpen(false);
@@ -374,7 +366,7 @@ export default function Composer(props: {
                 ＋
               </button>
               {plusOpen ? (
-                <div className="popup">
+                <AnchoredPopover anchorRef={plusRef} onClose={() => setPlusOpen(false)} className="popup" label="添加附件与工作目录">
                   <button
                     className="popup-item"
                     disabled={!props.canPickLocal}
@@ -424,13 +416,15 @@ export default function Composer(props: {
                   {!props.canPickLocal ? (
                     <div className="popup-note">这台设备读不了本地文件，去设置里配好遥控。</div>
                   ) : null}
-                </div>
+                </AnchoredPopover>
               ) : null}
             </div>
 
-            <div className="menu-anchor">
+            <div className="menu-anchor" ref={approvalRef}>
               <button
                 className={`btn sm ghost approval-${props.approvalMode}`}
+                aria-expanded={approvalOpen}
+                aria-haspopup="dialog"
                 title={current.desc}
                 onClick={() => {
                   setApprovalOpen((v) => !v);
@@ -441,7 +435,7 @@ export default function Composer(props: {
                 {current.label}
               </button>
               {approvalOpen ? (
-                <div className="popup wide">
+                <AnchoredPopover anchorRef={approvalRef} onClose={() => setApprovalOpen(false)} className="popup wide" label="操作确认方式">
                   {APPROVAL_OPTIONS.map((o) => (
                     <button
                       key={o.value}
@@ -460,7 +454,7 @@ export default function Composer(props: {
                       </span>
                     </button>
                   ))}
-                </div>
+                </AnchoredPopover>
               ) : null}
             </div>
 

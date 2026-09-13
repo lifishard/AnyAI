@@ -33,19 +33,18 @@
 }
 
 .context-meter { position: relative; font-size: 12px; }
-.context-meter > summary { display: flex; align-items: center; gap: 5px; cursor: pointer; list-style: none; border-radius: 6px; padding: 3px; }
-.context-meter > summary::-webkit-details-marker { display: none; }
-.context-meter > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.context-meter > button { display: flex; align-items: center; gap: 5px; cursor: pointer; border: 0; background: transparent; color: inherit; font: inherit; border-radius: 6px; padding: 3px; }
+.context-meter > button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .context-ring { width: 30px; height: 30px; border-radius: 50%; padding: 3px; display: inline-flex; flex-shrink: 0; }
 .context-ring > span { background: var(--bg-elev); border-radius: 50%; width: 24px; height: 24px; display: grid; place-items: center; font-size: 8px; font-variant-numeric: tabular-nums; }
 .context-meter-label { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
-.context-popover { position: absolute; z-index: 120; right: 0; bottom: calc(100% + 12px); width: 310px; padding: 18px; background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); line-height: 1.6; }
+.context-popover { width: 310px; padding: 18px; background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); font-size: 12px; line-height: 1.6; }
 .context-total { font-size: 24px; margin: 9px 0 12px; font-variant-numeric: tabular-nums; }
 .context-total small { font-size: 12px; color: var(--fg-dim); }
 .context-popover dl { margin: 0; }
 .context-popover dl > div { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
-.context-popover dt { color: var(--fg-dim); }
-.context-popover dd { margin: 0; font-variant-numeric: tabular-nums; }
+.context-popover dt { color: var(--fg-dim); min-width: 0; }
+.context-popover dd { margin: 0; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .context-popover .context-quota-row { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .context-popover p { margin: 12px 0 0; }
 .milestone-panel { border: 1px solid var(--border); border-radius: 10px; margin: 16px 0; padding: 12px 16px; background: var(--bg-elev); }
@@ -67,7 +66,6 @@
 .route-settings > details > summary { cursor: pointer; margin: 10px 0; }
 @media (max-width: 600px) {
   .context-meter-label { display: none; }
-  .context-popover { position: fixed; left: 12px; right: 12px; bottom: 170px; width: auto; max-height: 65vh; overflow: auto; }
 }
 
 :root[data-theme='dark'] {
@@ -844,6 +842,7 @@ input[type='range'] {
 
 .composer-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   font-size: 11.5px;
@@ -1727,6 +1726,7 @@ input[type='range'] {
 .menu-anchor {
   position: relative;
   display: inline-flex;
+  max-width: 100%;
 }
 
 .popup {
@@ -2688,26 +2688,29 @@ kbd {
   border: 1px solid var(--border);
 }
 
-/* ---------------- 弹层高度自适应 ----------------
- * 弹层自己不滚动（滚整块会把搜索框也卷走），只让内部的列表滚。
- * 高度由组件按可用空间算好之后以 inline style 传进来。
- */
-.popup.picker {
-  overflow: hidden;
+/* Body portal avoids the chat scroller's clipping; dimensions track the anchor. */
+.anchored-popover {
+  position: fixed;
+  inset: auto;
+  visibility: hidden;
+  z-index: 120;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
 }
-/* 往下开的时候贴在按钮下沿 */
-.popup.down {
-  bottom: auto;
-  top: calc(100% + 6px);
-}
-/* 模型那一节要能被压缩，列表自己滚 */
-.popup.picker > .picker-section:last-child {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
+.anchored-popover.popup { width: 280px; min-width: 0; font-size: 11.5px; color: var(--fg); }
+.anchored-popover.wide, .anchored-popover.effort-popup { width: 330px; }
+.anchored-popover.picker { width: 340px; }
+.anchored-popover > * { flex-shrink: 0; }
+.anchored-popover:focus { outline: none; }
+.picker-profile { max-width: 100%; overflow-wrap: anywhere; }
+.picker-probe { flex-wrap: wrap; }
+.popup.picker > .picker-section:last-child { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.popup.picker > .picker-section > * { flex-shrink: 0; }
 .popup.picker .picker-list {
   flex: 1 1 auto;
+  max-height: 300px;
   min-height: 88px;
 }
 

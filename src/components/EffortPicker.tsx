@@ -1,4 +1,5 @@
 import React from 'react';
+import AnchoredPopover from './AnchoredPopover';
 import type { RouteOverrides } from '../types';
 import { EFFORT_LEVELS, describeEffort, matchMapping, type EffortLevel, type EffortMapping } from '../lib/effort';
 
@@ -21,15 +22,6 @@ export default function EffortPicker(props: {
   const [open, setOpen] = React.useState(false);
   const anchorRef = React.useRef<HTMLDivElement>(null);
 
-  React.useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (anchorRef.current && !anchorRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
-
   const cur = EFFORT_LEVELS.find((l) => l.value === props.level) ?? EFFORT_LEVELS[0];
   const mapping = matchMapping(props.model, props.mappings);
   const routed = props.route?.effortStyle && props.route.effortStyle !== 'mapping';
@@ -45,6 +37,8 @@ export default function EffortPicker(props: {
     <div className="menu-anchor" ref={anchorRef}>
       <button
         className={`btn sm ghost effort-btn${props.level !== 'off' && supported ? ' on' : ''}`}
+        aria-expanded={open}
+        aria-haspopup="dialog"
         title={props.manual ? '配置面板里手动接管了思考字段，这里不生效' : describe(props.level)}
         onClick={() => setOpen((v) => !v)}
       >
@@ -52,7 +46,7 @@ export default function EffortPicker(props: {
       </button>
 
       {open ? (
-        <div className="popup effort-popup">
+        <AnchoredPopover anchorRef={anchorRef} onClose={() => setOpen(false)} className="popup effort-popup" label="思考强度" align="end">
           <div className="picker-label">思考强度</div>
 
           {props.manual ? (
@@ -90,7 +84,7 @@ export default function EffortPicker(props: {
               改映射
             </button>
           </div>
-        </div>
+        </AnchoredPopover>
       ) : null}
     </div>
   );
