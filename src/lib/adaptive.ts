@@ -1,7 +1,7 @@
 import type { ContextSnapshot, GenerationConfig, KeyProfile, ModelInfo, RouteOverrides } from '../types';
 import { estimateRequestTokens, type LearnedLimit } from './limits';
 
-export const RUNTIME_VERSION = 'adaptive-1';
+export const RUNTIME_VERSION = 'delivery-1';
 const CALIBRATION_KEY = 'anyai:context-calibration:v1';
 type Calibration = { ratio: number; count: number; at: number };
 const calibration = new Map<string,Calibration>();

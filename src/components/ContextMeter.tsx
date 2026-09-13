@@ -24,7 +24,7 @@ export default function ContextMeter({ preview, draft }: { preview: ContextPrevi
     if (preview.current) return { value: preview.current };
     try {
       const cap = capabilities(preview.profile,preview.config,preview.learned,preview.modelInfo);
-      const tools = preview.config.toolsEnabled ? [...new Set([...preview.toolNames,'read_context', ...(preview.config.runtime?.milestones === false ? [] : ['update_plan'])])] : [];
+      const tools = preview.config.toolsEnabled ? [...new Set([...preview.toolNames,'read_context', ...(preview.config.runtime?.milestones === false ? [] : ['update_plan','update_requirements','verify_requirements'])])] : [];
       const body = prepareBody(buildRequestBody(preview.config,buildWire([...preview.history,deferredDraft],preview.config,preview.extraSystem),tools,preview.mappings),preview.config,cap);
       return { value:snapshot(body,preview.config,preview.profile,cap) };
     } catch (e) { return { error:e instanceof Error ? e.message : String(e) }; }

@@ -295,6 +295,13 @@ function registerIpc() {
   ipcMain.handle('snc:runList', () => runtimeStore().list());
   ipcMain.handle('snc:runRemove', (_e, id) => runtimeStore().remove(id));
   ipcMain.handle('snc:exchanges', (_e, runId) => runtimeStore().exchanges(runId));
+  ipcMain.handle('snc:saveAnalysisExport', async (_e,{name,bytes}) => {
+    if (!(bytes instanceof Uint8Array) || bytes.length > 32*1024*1024 || bytes.length < 22 || !/^AnyAI-[a-z-]+-\d{4}-\d{2}-\d{2}\.zip$/.test(name)) throw new Error('分析导出包无效');
+    const chosen = await dialog.showSaveDialog(mainWindow,{defaultPath:path.join(app.getPath('downloads'),name),filters:[{name:'ZIP 分析包',extensions:['zip']}]});
+    if(chosen.canceled || !chosen.filePath)return null;
+    require('node:fs').writeFileSync(chosen.filePath,Buffer.from(bytes));
+    return verifyFiles([chosen.filePath],[path.dirname(chosen.filePath)]).files[0] ?? null;
+  });
   ipcMain.handle('snc:verifyFiles', (_e, { paths, roots }) => verifyFiles(paths, roots));
   ipcMain.handle('snc:saveArtifact', async (_e, { name, text, sourcePath }) => {
     const chosen = await dialog.showSaveDialog(mainWindow, { defaultPath: path.join(app.getPath('downloads'), path.basename(name || 'output.txt')) });

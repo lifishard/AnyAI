@@ -17,6 +17,7 @@ const computer = require('./computer.cjs');
 const { runtimeStore } = require('../run-store.cjs');
 const { verifyFiles } = require('../file-records.cjs');
 const crypto = require('node:crypto');
+const { inspectDeliverable, recoverExactWrite } = require('./verification.cjs');
 
 /** 按 id 取密钥。工具模块通过这个函数拿，拿不到就返回 null */
 async function secrets(id) {
@@ -28,6 +29,21 @@ async function secrets(id) {
 }
 
 const HANDLERS = {
+  reconcile_operation: async (a,c) => {
+    const runId=String(a.runId || ''),callId=String(a.callId || ''),name=String(a.name || '');
+    const input=a.args && typeof a.args==='object'?a.args:{};
+    const job=runtimeStore().job(runId,callId);
+    if(!job)return {ok:false,operationStatus:'not_started',content:'这项旧计划尚未开始；用户补充要求后已取消派发。',summary:'取消尚未执行的旧计划'};
+    const fingerprint=crypto.createHash('sha256').update(JSON.stringify({name,args:input})).digest('hex');
+    if(job.fingerprint!==fingerprint)return {ok:false,uncertain:true,operationStatus:'uncertain',content:'',error:'原操作记录与参数不一致，需要核实'};
+    if(job.result)return {...job.result,operationStatus:'completed'};
+    const active=activeJobs.get(`${runId}:${callId}`);
+    if(active){const result=await active.promise;return {...result,operationStatus:result.uncertain?'uncertain':'completed'};}
+    const recovered=name==='write_file'?recoverExactWrite(input,c):null;
+    if(recovered){recovered.files=verifyFiles([recovered.filePath],c.workspaceRoots).files;runtimeStore().saveJob(runId,callId,{fingerprint,name,status:'completed',result:recovered,at:Date.now(),recovered:true});return {...recovered,operationStatus:'completed'};}
+    return {ok:false,uncertain:true,operationStatus:'uncertain',content:'',error:'旧操作已经开始，但没有可靠结果；先核实该操作，随后按补充信息重新规划。'};
+  },
+  inspect_deliverable: inspectDeliverable,
   read_tool_result: (a) => {
     const r = runtimeStore().readResult(String(a.id || ''), a.offset, a.limit);
     return { ok: true, content: JSON.stringify(r), summary: '读取已保存的工具结果' };
@@ -101,7 +117,7 @@ async function executeTool(name, args, ctx) {
   const execution = merged.execution;
   const journal = execution?.runId && execution?.callId ? runtimeStore() : null;
   const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ name, args: input })).digest('hex');
-  const readOnly = new Set(['read_tool_result', 'register_outputs', 'web_search', 'fetch_url', 'list_dir',
+  const readOnly = new Set(['inspect_deliverable', 'read_tool_result', 'register_outputs', 'web_search', 'fetch_url', 'list_dir',
     'read_file', 'read_document', 'search_files', 'chrome_tabs', 'chrome_read_page', 'chrome_fetch_json', 'github_search',
     'project_memory_read', 'project_doc_read', 'skill_list']);
   if (journal) {
@@ -109,6 +125,12 @@ async function executeTool(name, args, ctx) {
     if (previous && previous.fingerprint !== fingerprint) return fail('同一工具调用编号对应了不同参数，已停止执行');
     if (previous?.result) return previous.result;
     if (previous?.status === 'started' && !readOnly.has(name) && !execution.retryUncertain) {
+      const recovered = name === 'write_file' ? recoverExactWrite(input,merged) : null;
+      if (recovered) {
+        recovered.files = verifyFiles([recovered.filePath],merged.workspaceRoots).files;
+        journal.saveJob(execution.runId,execution.callId,{fingerprint,name,status:'completed',result:recovered,at:Date.now(),recovered:true});
+        return recovered;
+      }
       return { ok: false, content: '', uncertain: true,
         error: '这一步在中断前已开始，但没有可靠的完成记录。请先核实外部结果，再选择跳过或明确允许重试，避免重复操作。' };
     }

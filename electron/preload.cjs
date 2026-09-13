@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('snc', {
   platform: 'electron',
   runSave: (record) => ipcRenderer.invoke('snc:runSave', record),
   runList: () => ipcRenderer.invoke('snc:runList'),
+  saveAnalysisExport: (name, bytes) => ipcRenderer.invoke('snc:saveAnalysisExport',{name,bytes}),
   runRemove: (id) => ipcRenderer.invoke('snc:runRemove', id),
   exchanges: (runId) => ipcRenderer.invoke('snc:exchanges', runId),
   verifyFiles: (paths, roots) => ipcRenderer.invoke('snc:verifyFiles', { paths, roots }),

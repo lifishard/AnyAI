@@ -13,6 +13,7 @@ export default function Sidebar(props: {
   onTogglePin: (id: string) => void;
   onFork: (id: string) => void;
   onOpenSettings: () => void;
+  onOpenObservations: () => void;
   onHide: () => void;
 
   projects: Project[];
@@ -219,6 +220,7 @@ export default function Sidebar(props: {
         <button className="btn block ghost" onClick={props.onOpenSettings}>
           ⚙ 设置
         </button>
+        <button className="btn block ghost" onClick={props.onOpenObservations}>任务记录与分析</button>
       </div>
     </>
   );

@@ -40,6 +40,7 @@ import { filePathsInText } from './artifacts';
 import { endExchange } from './wiretap';
 import { calibratedTokens, capabilities, observeInput, outputReserve, prepareBody, quotaKey, routeKey, snapshot, workingBudget, RUNTIME_VERSION } from './adaptive';
 import { compressionCandidate, memoryInstructions, memoryView, readContext, updatePlan, validateCompaction } from './context-memory';
+import { deliveryReport, recoveryInfo, updateRequirements, verifyRequirements } from './delivery';
 
 export interface AgentEvents {
   onContentDelta(s: string): void;
@@ -304,6 +305,11 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     startedAt: resume?.startedAt ?? Date.now(), reason: undefined, errorInfo: undefined,
     runtimeVersion: RUNTIME_VERSION, milestones: structuredClone(resume?.milestones ?? []),
     compactions: quoteBoundary > 0 ? [] : structuredClone(resume?.compactions ?? []), requestStats: [...(resume?.requestStats ?? [])],
+    requirements: structuredClone(resume?.requirements ?? []),
+    requirementSourceIds: [...new Set([...(resume?.requirementSourceIds ?? []),...args.history.filter(m => m.role === 'user').map(m => m.id)])].filter(id => scopedWorking.some(m => m.id === id)),
+    recovery: undefined,
+    attemptId: args.requestId, attemptStartedAt: Date.now(),
+    isResumedAttempt: Boolean(resume), waitKind:undefined,
   };
   // Legacy snapshots did not store a tool cursor. Recover the unreturned calls as a batch.
   if (resume && !resume.version) {
@@ -323,6 +329,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
   let contextTarget = Infinity;
   let compressionFailedAt = -1;
   let milestoneStops = 0;
+  let acceptanceStops = 0;
   let repeatedStops = 0;
   let budgetTimer: ReturnType<typeof setTimeout> | undefined;
   if (policy.maxMinutes > 0) budgetTimer = setTimeout(() => {
@@ -340,6 +347,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     if (ended) return;
     state.status = 'paused'; state.reason = reason; state.errorInfo = info;
     state.stoppedBy = userPaused ? 'user' : 'error';
+    state.delivery = deliveryReport(state); state.recovery = recoveryInfo(state);
     if (!persistenceFailed) await save();
     ended = true;
     events.onNotice('');
@@ -355,6 +363,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     const estimated = rejected ? 0 : stat.estimatedInput+(failed ? estimateTokens(text) : Math.max(stat.reservedOutput,estimateTokens(text)));
     state.spentTokens = (state.spentTokens ?? 0)+(reported ?? estimated);
     Object.assign(stat,{ actualInput:usage?.prompt_tokens, output:usage?.completion_tokens, elapsedMs:Date.now()-stat.at,
+      httpStatus:status ?? stat.httpStatus,
       outcome:control.signal.aborted ? 'cancelled' : failed ? 'failed' : 'accepted' });
     for (const field of ['prompt_tokens','completion_tokens','total_tokens','cached_tokens','reasoning_tokens'] as const) {
       if (usage?.[field] !== undefined) state.usage![field] = (state.usage![field] ?? 0)+usage[field]!;
@@ -364,10 +373,10 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
   const pauseInfo = (title: string): ErrorInfo => ({ kind: 'unknown', title, detail: title, fixes: [], retryable: false, blameModel: false });
   const wait = async (ms: number, reason: string) => {
     if (ms > policy.recoveryMinutes*60000) throw new Error('额度恢复时间超过本阶段自动等待上限，进度已保留');
-    state.status = 'waiting'; state.nextRetryAt = Date.now()+ms; state.reason = reason;
+    state.status = 'waiting'; state.waitKind='quota'; state.nextRetryAt = Date.now()+ms; state.reason = reason;
     await save();
     await waitCancellable(ms, control.signal, (left) => events.onNotice(`${reason}，${Math.ceil(left/1000)} 秒后继续`));
-    state.status = 'running'; state.nextRetryAt = undefined; state.reason = undefined;
+    state.status = 'running'; state.waitKind=undefined; state.nextRetryAt = undefined; state.reason = undefined;
   };
   const interrupted = async <T,>(promise: Promise<T>): Promise<T> => {
     if (control.signal.aborted) throw abortError();
@@ -387,12 +396,17 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     control.abort();
     if (activeRequest) void transport.abort(activeRequest);
   } };
+  const awaitUser = async <T,>(action:()=>Promise<T>):Promise<T> => {
+    const invoke=action;state.status='waiting';state.waitKind='approval';events.onNotice('等待你确认此操作，已有进度保留');await save();
+    try{return await interrupted(invoke());}
+    finally{if(!control.signal.aborted){state.status='running';state.waitKind=undefined;events.onNotice('');await save();}}
+  };
 
   void (async () => {
     try {
       const usable = new Set(availableTools(args.canRunHostTools).map((t) => t.name));
       const toolNames = cfg.toolsEnabled ? [...new Set([...cfg.enabledTools,
-        'read_context', ...(cfg.runtime?.milestones === false && !state.milestones?.length ? [] : ['update_plan'])])].filter((n) => usable.has(n) && TOOL_BY_NAME[n]) : [];
+        'read_context', ...(cfg.runtime?.milestones === false && !state.milestones?.length && !state.requirements?.length ? [] : ['update_plan','update_requirements','verify_requirements'])])].filter((n) => usable.has(n) && TOOL_BY_NAME[n]) : [];
       if (cfg.toolsEnabled && !toolNames.length) {
         await finishPause('工具开关已开启，但没有可用工具', { ...pauseInfo('没有可用工具'), kind: 'tools_unsupported', fixes: ['在配置中选择至少一个当前平台可用的工具'] });
         return;
@@ -433,14 +447,16 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           paceTpm: cap.tpm, paceItpm: cap.itpm, paceOtpm: cap.otpm, cachedInputCounts: cap.cachedInputCounts,
           paceMinMs: cap.rpm ? Math.ceil(60000/cap.rpm) : undefined,
         }, { onContent(d) { text += d; dispatched = true; }, onReasoning(d) { summaryReasoning += d; dispatched = true; }, onToolCalls() {}, onStop(s) { reason = s.reason; }, onUsage(u) { usage = u; },
-          onDispatch() { dispatched = true; },
+          onDispatch() { dispatched = true; stat.dispatchedAt = Date.now();state.status='running';state.waitKind=undefined;void save().catch(()=>control.abort()); },
           onPaceWait(ms) {
-            compressionWaitStarted ||= Date.now();
+            const first=!compressionWaitStarted;compressionWaitStarted ||= Date.now();
             if (!checkWait(requestId,ms,compressionWaitStarted)) return;
+            state.status='waiting';state.waitKind='quota';if(first)void save().catch(()=>control.abort());
             events.onNotice(`整理上下文等待额度，${Math.ceil(ms/1000)} 秒后继续`);
           },
           onResponse(status,headers) {
             dispatched = true;
+            stat.httpStatus=status;
             const limits = quotaLimits(headers);
             if (Object.keys(limits).length) args.onLearnLimit?.({ ...limits,at:Date.now(),from:`摘要 HTTP ${status} 响应头` });
           },
@@ -498,6 +514,14 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
             if (resolving && args.resolveUncertain === 'skip') {
               result = { ok: false, content: '', error: '用户已核实并选择跳过此操作，程序没有重新执行。' };
               step.status = 'denied';
+            } else if (state.replanPending && !resolving) {
+              if (!args.canRunHostTools || ['read_context','update_plan','update_requirements','verify_requirements','request_access'].includes(call.name)) {
+                result={ok:false,content:'用户补充要求，取消尚未执行的旧计划；请重新规划。',summary:'取消尚未执行的旧计划'};step.status='denied';
+              } else {
+                result=await interrupted(transport.callTool('reconcile_operation',{runId:state.runId,callId:`${state.round}-${i}-${call.id}`,name:call.name,args:parsed},args.toolCtx()));
+                if(result.operationStatus==='not_started')step.status='denied';
+                else if(result.operationStatus!=='completed'&&!result.uncertain)result={ok:false,content:'',uncertain:true,error:'当前环境未提供可靠的原操作核实结果'};
+              }
             } else if (!def || !toolNames.includes(call.name)) {
               result = { ok: false, content: '', error: `工具未启用：${call.name}` };
             } else if (parseError) {
@@ -508,7 +532,8 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               if (prior.filter((s) => s.status === 'error').length >= 2) {
                 result = { ok: false, content: '', error: '相同参数已经失败两次，本次未重复执行。请检查返回结构、改用更小查询或另一种工具。' };
               } else {
-                const permitted = !def.dangerous || await interrupted(args.confirm(step));
+                const asks=def.dangerous && (call.name==='request_access' || (call.name==='run_command'&&Boolean(parsed.elevated)) || cfg.approvalMode==='ask' || (cfg.approvalMode==='auto' && (def.group==='shell'||def.group==='agent')));
+                const permitted = !def.dangerous || (asks ? await awaitUser(()=>args.confirm(step)) : await interrupted(args.confirm(step)));
                 if (!permitted) {
                   result = { ok: false, content: '', error: '用户拒绝了操作，请换一种已获准的方法。' };
                   step.status = 'denied';
@@ -517,8 +542,12 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
                   try {
                     result = call.name === 'read_context' ? readContext(state, parsed)
                       : call.name === 'update_plan' ? updatePlan(state, parsed)
+                      : call.name === 'update_requirements' ? updateRequirements(state, parsed)
+                      : call.name === 'verify_requirements' ? await interrupted(verifyRequirements(state,parsed,check => args.canRunHostTools
+                        ? transport.callTool('inspect_deliverable',check,{...args.toolCtx()})
+                        : Promise.resolve({ok:false,content:'',error:'当前环境没有本地文件核验能力'})))
                       : call.name === 'request_access'
-                      ? await interrupted(args.grantAccess({ scope: String(parsed.scope ?? '') as AccessRequest['scope'], target: parsed.target ? String(parsed.target) : undefined, reason: String(parsed.reason ?? '') }))
+                      ? await awaitUser(()=>args.grantAccess({ scope: String(parsed.scope ?? '') as AccessRequest['scope'], target: parsed.target ? String(parsed.target) : undefined, reason: String(parsed.reason ?? '') }))
                       : await interrupted(transport.callTool(call.name, parsed, { ...args.toolCtx(), execution: {
                         runId: state.runId!, callId: `${state.round}-${i}-${call.id}`, retryUncertain: resolving && args.resolveUncertain === 'retry',
                       } }));
@@ -545,6 +574,11 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               output: clipToolOutput(result.content), error: result.error, summary: result.summary ?? step.summary,
               sources: fresh, filePath: result.filePath, files: result.files, resultRef: result.resultRef,
               elapsedMs: Date.now()-step.startedAt });
+            if (result.files?.some(f => f.direction === 'output') && !['register_outputs','inspect_deliverable'].includes(call.name)) {
+              for (const r of state.requirements ?? []) if (r.verification && (r.check.kind==='review' || result.files.some(f => f.direction === 'output' && f.path.replace(/\\/g,'/').toLowerCase() === r.check.path?.replace(/\\/g,'/').toLowerCase()))) {
+                r.verificationHistory = [...(r.verificationHistory ?? []),r.verification]; r.verification = undefined;
+              }
+            }
             state.working.push({ id: uid('m'), role: 'tool', content: renderToolOutput(result, fresh),
               toolCallId: call.id, toolName: call.name, createdAt: Date.now() });
             // Screenshots follow the whole batch so tool result pairs remain contiguous.
@@ -561,6 +595,12 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           }
           const images = state.working.filter((m) => m.id === `screens-${state.round}`);
           state.working = [...state.working.filter((m) => m.id !== `screens-${state.round}`), ...images];
+          if(state.pendingInputMessages?.length){
+            state.working.push(...state.pendingInputMessages);
+            state.requirementSourceIds=[...new Set([...(state.requirementSourceIds??[]),...state.pendingInputMessages.map(m=>m.id)])];
+            state.pendingInputMessages=[];
+          }
+          state.replanPending=false;
           const recent = state.steps!.slice(-5);
           const failures = recent.filter((s) => s.status === 'error' || /(?:is not a function|TypeError|ReferenceError)/i.test(s.output ?? ''));
           if (recent.length >= 5 && failures.length >= 4) {
@@ -639,13 +679,14 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
             onUsage(u) { usage = u; },
             onResponse(status, headers) {
               dispatched = true;
+              stat.httpStatus=status;
               responseHeaders = headers;
               const limits = quotaLimits(headers);
               if (Object.keys(limits).length) args.onLearnLimit?.({ ...limits, at: Date.now(), from: `HTTP ${status} 响应头` });
             },
             onPaceWait(ms) {
               if (!checkWait(requestId,ms,recordedWait || Date.now())) return;
-              state.status = 'waiting'; state.nextRetryAt = Date.now()+ms;
+              state.status = 'waiting'; state.waitKind='quota'; state.nextRetryAt = Date.now()+ms;
               if (state.contextSnapshot) state.contextSnapshot.phase = 'waiting';
               events.onNotice(`等待调用额度，${Math.ceil(ms/1000)} 秒后继续；已完成步骤保留`);
               if (!recordedWait) {
@@ -655,7 +696,8 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
             },
             onDispatch() {
               dispatched = true;
-              state.status = 'running'; state.nextRetryAt = undefined;
+              stat.dispatchedAt = Date.now();
+              state.status = 'running'; state.waitKind=undefined; state.nextRetryAt = undefined;
               if (state.contextSnapshot) state.contextSnapshot.phase = 'running';
               events.onNotice('');
               void save().catch(() => { control.abort(); void transport.abort(requestId); });
@@ -694,6 +736,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           const incomplete = /响应未完整|工具调用不完整/.test(failure.message);
           const info = incomplete ? { ...pauseInfo(failure.message), kind: 'network' as const, retryable: true }
             : classifyError(failure.message, failure.status, { model: cfg.model, profileName: args.profileName, sentTools: toolNames.length > 0 });
+          stat.failureKind=info.kind;
           const recoveryLimit = policy.recoveryMinutes*60_000;
           const elapsed = Date.now()-recoveryStarted;
           const retryAllowed = args.autoRetry > 0 && info.retryable && (!incomplete || attempts <= args.autoRetry) && !budgetExceeded(reserved) &&
@@ -751,7 +794,25 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
             { id: uid('m'), role: 'user', content: '计划中仍有未完成项目。请继续执行并核对验收条件，使用 update_plan 更新证据；若无法继续，将对应项目标为 blocked 并写明原因。', createdAt: Date.now() });
           state.round++; await save(); continue;
         }
-        state.status = 'completed'; state.reason = undefined; state.errorInfo = undefined;
+        const finalChecks=(state.requirements??[]).filter(r=>r.check.kind!=='review').map(r=>r.id);
+        if(finalChecks.length && toolNames.includes('verify_requirements')){
+          const startedAt=Date.now();
+          const verified=await interrupted(verifyRequirements(state,{ids:finalChecks},check=>args.canRunHostTools
+            ?transport.callTool('inspect_deliverable',check,args.toolCtx())
+            :Promise.resolve({ok:false,content:'',error:'当前环境无法核验本地文件'})));
+          const step:ToolStep={id:`acceptance-${state.runId}-${state.round}`,callId:`acceptance-${state.round}`,name:'verify_requirements',args:{ids:finalChecks},status:verified.ok?'ok':'error',summary:'交付前重新核对程序条件',output:verified.content,error:verified.error,startedAt,elapsedMs:Date.now()-startedAt};
+          state.steps!.push(step);events.onStep(step);
+        }
+        state.delivery = deliveryReport(state);
+        if (state.requirements?.length && ['unchecked','failed'].includes(state.delivery.status)) {
+          if (!toolNames.includes('verify_requirements') || acceptanceStops++ >= 2 || state.round >= maxRound) {
+            await finishPause('交付验收尚未通过：请查看未检查或未通过的要求，已有成果已保存'); return;
+          }
+          state.working.push({id:uid('m'),role:'assistant',content:resultContent,createdAt:Date.now()},
+            {id:uid('m'),role:'user',content:'交付要求仍有未检查或未通过项。用 verify_requirements 核验已有条件，失败后修复再核验；不得放宽条件。无法检查的语义要求明确标记 unverifiable。',createdAt:Date.now()});
+          state.round++; await save(); continue;
+        }
+        state.status = 'completed'; state.reason = undefined; state.errorInfo = undefined; state.recovery = undefined;
         await save(); // Persist completion before removing the resume affordance.
         await events.onRunState(null);
         ended = true; events.onNotice(''); events.onDone(); return;

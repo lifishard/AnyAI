@@ -52,6 +52,19 @@ const clip = (v: unknown, n = 48): string => {
 
 export const TOOLS: ToolDef[] = [
   {
+    name:'update_requirements',label:'记录交付要求',group:'agent',
+    description:'复杂任务开始时记录用户要求与可检查条件，按 id 合并，遗漏项保留。sourceId 和 sourceQuote 必须来自原始用户消息。检查范围只能证明指定条件：file_exists 只证明文件存在；json 核对解析、顶层数组 count 和 requiredKeys；ics 核对基本格式和事件 count；answer_contains 只核对答案字面 contains；review 供开放式语义复核。覆盖完整性应另列 review 要求，不能用文件存在替代。修订会清除旧检查结果。',
+    parameters:{type:'object',properties:{requirements:{type:'array',maxItems:20,items:{type:'object',properties:{
+      id:{type:'string'},title:{type:'string'},sourceId:{type:'string'},sourceQuote:{type:'string'},milestoneId:{type:'string'},
+      check:{type:'object',properties:{kind:{type:'string',enum:['file_exists','json','ics','answer_contains','review']},path:{type:'string'},contains:{type:'array',items:{type:'string'}},requiredKeys:{type:'array',items:{type:'string'}},count:{type:'integer',minimum:0}},required:['kind']},
+    },required:['id','title','sourceId','sourceQuote','check']}}},required:['requirements']},summarize:()=> '记录用户要求与验收条件',
+  },
+  {
+    name:'verify_requirements',label:'核验交付要求',group:'agent',
+    description:'核验已有要求。程序检查由客户端只读执行，模型不能指定其通过状态。review 类型必须附 reviews：status、逐项覆盖说明 detail、已成功工具 callId 或 text:已输出答案原文 evidence。无法核实时用 unverifiable；模型复核会明确标注，不能声称独立验证。失败后修复再核验，不能放宽条件。',
+    parameters:{type:'object',properties:{ids:{type:'array',items:{type:'string'}},reviews:{type:'array',items:{type:'object',properties:{id:{type:'string'},status:{type:'string',enum:['passed','failed','unverifiable']},detail:{type:'string'},evidence:{type:'array',items:{type:'string'}}},required:['id','status','detail']}}},required:['ids']},summarize:()=> '逐项核验交付结果',
+  },
+  {
     name: 'update_plan', label: '更新里程碑', group: 'agent',
     description: '为复杂任务创建或更新里程碑（按 id 合并，未提交项保留）。完成项的 evidence 必须是成功工具的 callId，或 text: 后附已经写出的答案原文。文件存在不代表任务覆盖完整，请按 acceptance 核验后完成。',
     parameters: { type: 'object', properties: { milestones: { type: 'array', items: { type: 'object', properties: {

@@ -24,6 +24,7 @@ import { formatExchange, failedExchange, exchangeOf, importExchanges } from './l
 import { loadRuns, saveRun, recoverConversations, forgetRuns } from './lib/runs';
 import { localProgress } from './lib/task-context';
 import { capabilities, outputReserve, quotaKey, routeKey, workingBudget } from './lib/adaptive';
+import { addRunInput } from './lib/delivery';
 import { limitKey, mergeLearnedLimit, pacingFloor, estimateRequestTokens } from './lib/limits';
 import { buildWire, runAgent, type AgentHandle } from './lib/agent';
 import {
@@ -74,6 +75,7 @@ import ToolConfirm from './components/ToolConfirm';
 import GrantDialog, { REMEMBER_DAYS } from './components/GrantDialog';
 import WorkspaceDialog from './components/WorkspaceDialog';
 import { Modal, Toast, useToast } from './components/ui';
+const ObservationPanel = React.lazy(()=>import('./components/ObservationPanel'));
 
 const EXAMPLES = [
   '日日新现在有哪些免费模型，各自的上下文长度是多少？',
@@ -100,6 +102,7 @@ export default function App() {
 
   const [busy, setBusy] = React.useState<{ requestId: string; handle: AgentHandle } | null>(null);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const [observationsOpen,setObservationsOpen] = React.useState(false);
   const [settingsTab, setSettingsTab] = React.useState<string>('keys');
   const [configOpen, setConfigOpen] = React.useState(false);
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
@@ -1009,7 +1012,7 @@ export default function App() {
                 title: nextConv.title, state });
             }
             patchMessage(convId, answerMsg.id, { runState: state ?? undefined,
-              ...(state ? { milestones: state.milestones, contextSnapshot: state.contextSnapshot } : {}) });
+              ...(state ? { milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery, taskId:state.runId, supplementalInputs:state.supplementalInputs } : {}) });
           },
           onPaused(reason) {
             finishUi(); setQueuePaused(true);
@@ -1085,11 +1088,17 @@ export default function App() {
   }
 
   const resumeRun = React.useCallback(
-    (msg: ChatMessage, resolution?: 'skip' | 'retry') => {
+    (msg: ChatMessage, resolution?: 'skip' | 'retry', additionalInput?: string) => {
       if (busy || !msg.runState || !active) return;
       const index = active.messages.findIndex((m) => m.id === msg.id);
       const question = active.messages[index-1]?.content ?? '继续';
-      void send(question, undefined, msg.runState, undefined, resolution);
+      let state = structuredClone(msg.runState);
+      if (additionalInput?.trim()) {
+        const message: ChatMessage = {id:uid('m'),role:'user',content:additionalInput.trim(),createdAt:Date.now()};
+        state=addRunInput(state,message);
+        state.reason = '用户已补充信息，正在继续';
+      }
+      void send(question, undefined, state, undefined, resolution);
     }, [busy, active, send],
   );
 
@@ -1358,6 +1367,7 @@ export default function App() {
             setSettingsOpen(true);
             setSidebarOpen(false);
           }}
+          onOpenObservations={()=>{setObservationsOpen(true);setSidebarOpen(false);}}
         />
       </aside>
       ) : null}
@@ -1466,6 +1476,7 @@ export default function App() {
                     }
                     onProbe={busy ? undefined : () => void runRequestProbe(t.a ?? undefined)}
                     onResume={busy || !t.a?.runState ? undefined : () => resumeRun(t.a!)}
+                    onResumeWithInput={busy || !t.a?.runState ? undefined : (text) => resumeRun(t.a!,undefined,text)}
                     onResolveUncertain={busy || !t.a?.runState ? undefined : (choice) => resumeRun(t.a!, choice)}
                     onSaveAnnotation={saveAnnotation}
                     onDeleteAnnotation={(messageId, noteId) => changeAnnotation(messageId, noteId)}
@@ -1581,6 +1592,9 @@ export default function App() {
         </ErrorBoundary>
       ) : null}
 
+      {observationsOpen ? <React.Suspense fallback={<Modal title="任务记录与分析" onClose={()=>setObservationsOpen(false)}><div className="modal-body">正在读取记录…</div></Modal>}>
+        <ObservationPanel onClose={()=>setObservationsOpen(false)} onOpenTask={(conversationId,answerId)=>{setActiveId(conversationId);setObservationsOpen(false);setTimeout(()=>document.getElementById(`msg-${answerId}`)?.scrollIntoView({block:'center'}),150);}}/>
+      </React.Suspense>:null}
       {settingsOpen ? (
         <ErrorBoundary label="设置" onReset={() => setSettingsTab('keys')}>
         <SettingsDialog

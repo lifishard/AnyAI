@@ -2,6 +2,8 @@ import type { ChatMessage, Conversation, RunRecord } from '../types';
 import { desktop, getTransport } from './transport';
 import { collectArtifacts } from './artifacts';
 import { localProgress } from './task-context';
+import { deliveryReport } from './delivery';
+import { observeRun, reconcileObservations, removeObservations } from './observations';
 
 const KEY = 'anyai:runs:v2';
 const records = new Map<string, RunRecord>();
@@ -14,6 +16,7 @@ export async function loadRuns(): Promise<RunRecord[]> {
     : JSON.parse(await getTransport().kvGet(KEY) || '[]');
   records.clear();
   for (const r of list) if (r.id && r.state?.working) records.set(r.id, r);
+  await reconcileObservations([...records.values()]);
   return [...records.values()];
 }
 export async function saveRun(record: RunRecord): Promise<void> {
@@ -23,13 +26,14 @@ export async function saveRun(record: RunRecord): Promise<void> {
   if (bridge?.runSave) {
     await bridge.runSave(snapshot);
     if (forgotten.has(snapshot.id) || forgottenConversations.has(snapshot.conversationId)) await bridge.runRemove?.(snapshot.id);
-    else records.set(snapshot.id, snapshot);
+    else {records.set(snapshot.id, snapshot);await observeRun(snapshot);}
     return;
   }
   fallbackChain = fallbackChain.catch(() => {}).then(async () => {
     if (forgotten.has(snapshot.id) || forgottenConversations.has(snapshot.conversationId)) return;
     records.set(snapshot.id, snapshot);
     await getTransport().kvSet(KEY, JSON.stringify([...records.values()]));
+    await observeRun(snapshot);
   });
   await fallbackChain;
 }
@@ -46,7 +50,11 @@ export async function forgetRuns(conversationId: string, answerIds?: Set<string>
     fallbackChain = fallbackChain.catch(() => {}).then(() => getTransport().kvSet(KEY, JSON.stringify([...records.values()])));
     await fallbackChain;
   }
+  await removeObservations(conversationId,answerIds);
 }
+
+export function runRecord(id:string):RunRecord|undefined {const r=records.get(id);return r?structuredClone(r):undefined;}
+export function runTitle(id:string):string|undefined {const r=records.get(id);return r?(r.question.content.trim().replace(/\s+/g,' ').slice(0,96)||r.title):undefined;}
 /** Recover even if the conversation's debounced save had not yet happened. */
 export function recoverConversations(original: Conversation[], saved: RunRecord[]): Conversation[] {
   const list = original.map((c) => ({ ...c, messages: [...c.messages] }));
@@ -70,7 +78,7 @@ export function recoverConversations(original: Conversation[], saved: RunRecord[
       model: r.config.model, pending: false, content: state.content ?? existing?.content ?? '',
       reasoning: state.reasoning ?? existing?.reasoning, steps: state.steps ?? existing?.steps,
       sources: state.sources, usage: state.usage, runState: completed ? undefined : recovered,
-      milestones: state.milestones, contextSnapshot: state.contextSnapshot,
+      milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery ?? deliveryReport(state), taskId:r.id, supplementalInputs:state.supplementalInputs,
       progress: completed ? undefined : localProgress(state.steps ?? [], recovered.reason),
       artifacts: [...(existing?.artifacts ?? []), ...collectArtifacts(state.content ?? '', state.steps ?? [])]
         .filter((a, i, all) => all.findIndex((b) => b.path && a.path ? b.path === a.path && b.direction === a.direction : b.id === a.id) === i),

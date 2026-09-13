@@ -7,6 +7,9 @@ import { isCleanStop } from '../lib/errors';
 import Markdown from './Markdown';
 import MessageNotes from './MessageNotes';
 import MilestonePanel from './MilestonePanel';
+import DeliveryPanel from './DeliveryPanel';
+import RecoveryCard from './RecoveryCard';
+import TaskFeedback from './TaskFeedback';
 
 /** finish_reason 的人话注解，鼠标悬停时显示 */
 const STOP_HINT: Record<string, string> = {
@@ -216,6 +219,7 @@ export default function AnswerBlock(props: {
   onProbe?: () => void;
   /** 有中断现场时的「接着跑」 */
   onResume?: () => void;
+  onResumeWithInput?: (text:string) => void;
   onResolveUncertain?: (choice: 'skip' | 'retry') => void;
   onSaveAnnotation: (note: MessageAnnotation) => Promise<void>;
   onDeleteAnnotation: (messageId: string, noteId: string) => Promise<void>;
@@ -331,30 +335,18 @@ export default function AnswerBlock(props: {
       ) : null}
 
       {answer?.notice ? <div className="answer-notice">{answer.notice}</div> : null}
+      {answer?.supplementalInputs?.length ? <details className="delivery-panel"><summary>已补充的信息 · {answer.supplementalInputs.length} 条</summary>{answer.supplementalInputs.map(m=><blockquote key={m.id}>{m.content}</blockquote>)}</details>:null}
 
       {/*
         断线保护的入口。放在错误卡**上面**：先告诉人「东西还在」，
         再让他看出了什么事 —— 顺序反过来的话，人已经准备重问了
       */}
       {answer?.runState && !answer.pending && props.onResume ? (
-        <div className="resume-bar">
-          <span className="resume-icon">⏸</span>
-          <span>
-            这一轮停在第 {answer.runState.round} 轮
-            {answer.runState.stoppedBy === 'user' ? '（你按了停止）' : ''}，
-            已经查到的 {answer.runState.working.filter((m) => m.role === 'tool').length} 步结果都还在
-          </span>
-          <span style={{ flex: 1 }} />
-          {answer.runState.uncertainCallId && props.onResolveUncertain ? (
-            <div className="resume-actions">
-              <button className="btn sm" onClick={() => props.onResolveUncertain?.('skip')}>已核实，跳过此步</button>
-              <button className="btn sm" onClick={() => props.onResolveUncertain?.('retry')}>允许重试此步</button>
-            </div>
-          ) : <button className="btn sm primary" onClick={props.onResume}>接着跑</button>}
-        </div>
+        <RecoveryCard state={answer.runState} onResume={props.onResume} onAddInput={props.onResumeWithInput} onResolve={props.onResolveUncertain}/>
       ) : null}
 
       <MilestonePanel items={answer?.milestones ?? answer?.runState?.milestones} steps={answer?.steps ?? answer?.runState?.steps} />
+      <DeliveryPanel report={answer?.delivery ?? answer?.runState?.delivery} visible={Boolean(answer && !answer.pending && (answer.milestones?.length || answer.delivery?.requirements.length || answer.steps?.length))}/>
       {answer?.progress ? <div className="saved-progress"><strong>已保存的进度</strong><div>{answer.progress}</div></div> : null}
 
       {answer?.error ? (
@@ -384,6 +376,7 @@ export default function AnswerBlock(props: {
       {files.length && props.onOpenArtifact ? (
         <ArtifactStrip artifacts={files} onOpen={props.onOpenArtifact} onSaved={props.onArtifactSaved} />
       ) : null}
+      {answer && !answer.pending ? <TaskFeedback taskId={answer.taskId ?? answer.runState?.runId}/>:null}
 
       {answer ? <MessageNotes notes={answer.annotations} onSave={props.onSaveAnnotation}
         onDelete={(id) => props.onDeleteAnnotation(answer.id, id)} /> : null}

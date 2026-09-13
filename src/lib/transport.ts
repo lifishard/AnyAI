@@ -59,6 +59,7 @@ interface ElectronBridge {
   exchanges(runId?: string): Promise<Exchange[]>;
   verifyFiles(paths: string[], roots: string[]): Promise<{ files: FileRecord[]; errors: { path: string; error: string }[] }>;
   saveArtifact(name: string, text?: string, sourcePath?: string): Promise<FileRecord | null>;
+  saveAnalysisExport?(name:string,bytes:Uint8Array):Promise<FileRecord|null>;
   chat(init: ChatRequestInit): Promise<void>;
   abort(requestId: string): Promise<void>;
   getJson(url: string, headers: Record<string, string>, timeoutMs: number): Promise<unknown>;

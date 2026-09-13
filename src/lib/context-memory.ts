@@ -12,9 +12,11 @@ export function memoryView(state: RunState): ChatMessage[] {
     ...state.working.slice(last.throughIndex+1)];
 }
 export function memoryInstructions(state: RunState, allowPlan = true): string {
+  // Keep the active contract in every request; revision and verification histories stay on disk.
+  const requirements = (state.requirements ?? []).map(({ history, verificationHistory, ...active }) => active);
   const files = (state.steps ?? []).flatMap(s => s.files ?? []).map(f => ({ path: f.path, direction: f.direction }))
     .filter((f,i,all) => all.findIndex(x => x.path === f.path && x.direction === f.direction) === i);
-  return `\n${allowPlan ? '复杂任务先用 update_plan 建立 3–6 个可验收里程碑，完成时更新状态和证据；简单问答不用计划。不能遗漏未完成项目，也不能把计划当作完成证据。' : ''}用 read_context 查阅历史原文，read_tool_result 查阅已保存的完整工具结果，避免重复外部操作。\n当前里程碑：${JSON.stringify(state.milestones ?? [])}\n已核实文件索引：${JSON.stringify(files)}\n`;
+  return `\n${allowPlan ? '复杂任务先用 update_plan 建立 3–6 个里程碑，并用 update_requirements 将用户要求与验收条件对应。交付前 verify_requirements 逐项核验，修复失败项；无法核验明确标记。文件存在不代表内容或覆盖完整，完整性另列 review 要求。模型复核不是独立验证。简单问答不用计划。不能遗漏未完成项目，也不能把计划当作完成证据。' : ''}用 read_context 查阅历史原文，read_tool_result 查阅已保存的完整工具结果，避免重复外部操作。\n用户来源消息 ID：${JSON.stringify(state.requirementSourceIds ?? [])}\n交付要求：${JSON.stringify(requirements)}\n当前里程碑：${JSON.stringify(state.milestones ?? [])}\n已核实文件索引：${JSON.stringify(files)}\n`;
 }
 export function readContext(state: RunState, args: Record<string, unknown>): ToolResult {
   const offset = Math.max(0, Math.floor(Number(args.offset)||0));

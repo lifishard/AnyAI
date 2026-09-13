@@ -62,6 +62,53 @@ export interface Milestone {
   updatedAt: number;
 }
 
+export interface AcceptanceCheck {
+  kind: 'file_exists' | 'json' | 'ics' | 'answer_contains' | 'review';
+  path?: string;
+  contains?: string[];
+  requiredKeys?: string[];
+  count?: number;
+}
+export interface RequirementVersion {
+  revision: number;
+  title: string;
+  sourceId: string;
+  sourceQuote: string;
+  check: AcceptanceCheck;
+  at: number;
+}
+export interface RequirementVerification {
+  revision: number;
+  status: 'passed' | 'failed' | 'unverifiable';
+  method: 'program' | 'model';
+  detail: string;
+  evidence: string[];
+  at: number;
+}
+export interface DeliveryRequirement extends RequirementVersion {
+  id: string;
+  milestoneId?: string;
+  history: RequirementVersion[];
+  verification?: RequirementVerification;
+  verificationHistory?: RequirementVerification[];
+}
+export interface DeliveryReport {
+  requirements: DeliveryRequirement[];
+  coverage: 'model_defined' | 'not_defined';
+  status: 'unchecked' | 'passed' | 'failed' | 'unverifiable';
+  at: number;
+}
+export interface RecoveryInfo {
+  kind: 'user' | 'quota' | 'budget' | 'input' | 'permission' | 'uncertain' | 'verification' | 'connection' | 'other';
+  reason: string;
+  next: string;
+  target?: string;
+  completed: string[];
+  remaining: string[];
+  outputPaths: string[];
+  canAddInput: boolean;
+}
+
 export interface ContextCompaction {
   version: 1;
   id: string;
@@ -91,6 +138,9 @@ export interface RunRequestStat {
   elapsedMs?: number;
   outcome?: 'pending' | 'accepted' | 'failed' | 'rejected' | 'cancelled';
   detail?: string;
+  dispatchedAt?: number;
+  httpStatus?: number;
+  failureKind?: ErrorInfo['kind'];
 }
 
 export interface ModelInfo {
@@ -318,6 +368,9 @@ export interface ChatMessage {
   progress?: string;
   milestones?: Milestone[];
   contextSnapshot?: ContextSnapshot;
+  delivery?: DeliveryReport;
+  taskId?: string;
+  supplementalInputs?: {id:string;content:string;createdAt:number}[];
 }
 
 /** 中断现场。够用来无缝续跑，也够小到能塞进 localStorage */
@@ -355,6 +408,17 @@ export interface RunState {
   contextSnapshot?: ContextSnapshot;
   runtimeVersion?: string;
   requestStats?: RunRequestStat[];
+  requirements?: DeliveryRequirement[];
+  requirementSourceIds?: string[];
+  delivery?: DeliveryReport;
+  recovery?: RecoveryInfo;
+  attemptId?: string;
+  attemptStartedAt?: number;
+  isResumedAttempt?: boolean;
+  supplementalInputs?: {id:string;content:string;createdAt:number}[];
+  replanPending?: boolean;
+  pendingInputMessages?: ChatMessage[];
+  waitKind?: 'quota' | 'approval';
 }
 
 export interface RunRecord {
@@ -545,6 +609,7 @@ export interface ToolResult {
   resultRef?: string;
   /** 原生执行日志显示操作已开始但没有可靠完成记录。 */
   uncertain?: boolean;
+  operationStatus?: 'not_started' | 'completed' | 'uncertain';
 }
 
 /**
