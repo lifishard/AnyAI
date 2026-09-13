@@ -74,9 +74,9 @@
 
 | 平台 | 路径 |
 |---|---|
-| Windows | `%APPDATA%\AnyAI\store.json` |
-| macOS | `~/Library/Application Support/AnyAI/store.json` |
-| Linux | `~/.config/AnyAI/store.json` |
+| Windows | `%APPDATA%\anyai\store.json` |
+| macOS | `~/Library/Application Support/anyai/store.json` |
+| Linux | `~/.config/anyai/store.json` |
 
 ### 模型和凭据是**会话级**的
 

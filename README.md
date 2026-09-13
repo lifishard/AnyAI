@@ -59,7 +59,7 @@
 
 ### 从旧版升级
 
-项目曾使用 SenseNova Chat 和 AnyAI 两个名称。从 AnyAI 升级时，灯芯AI 继续使用原来的数据目录，保留配置、会话、任务记录和工具浏览器的登录资料。目录仍叫 `AnyAI`，属于兼容安排。
+项目曾使用 SenseNova Chat 和 AnyAI 两个名称。从 AnyAI 升级时，灯芯AI 继续使用原来的数据目录，保留配置、会话、任务记录和工具浏览器的登录资料。目录仍叫 `anyai`，属于兼容安排。
 
 安装新版前请退出旧版。应用目前没有自动更新功能，请从 Releases 下载新版本。
 
@@ -88,7 +88,7 @@ npm run dist:win
 
 桌面端使用 Electron 34，界面使用 React 19、Vite 和 TypeScript；Android 端使用 Capacitor 7。开发资料见 [架构说明](docs/ARCHITECTURE.md) 和 [贡献指南](CONTRIBUTING.md)。
 
-源码版本为 1.3.3，已发布版本以 [Releases](https://github.com/lifishard/wickrunAI/releases) 为准。目前 Android 真机运行、部分服务商的思考参数映射仍需验证。图片附件需要支持图片输入的模型。
+源码版本为 1.3.4，已发布版本以 [Releases](https://github.com/lifishard/wickrunAI/releases) 为准。目前 Android 真机运行、部分服务商的思考参数映射仍需验证。图片附件需要支持图片输入的模型。
 
 遇到问题，请在 [Issues](https://github.com/lifishard/wickrunAI/issues) 中提供应用版本、系统、端点、模型 ID 和复现步骤。附上日志或请求预览前，请删除 API Key 和私人内容。
 

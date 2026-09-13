@@ -10,9 +10,9 @@ function configureIdentity(app) {
   const session = app.getPath('sessionData');
   const defaultPath = path.join(app.getPath('appData'), app.getName());
   const isDefault = path.resolve(current) === path.resolve(defaultPath);
-  app.setName('AnyAI');
+  app.setName('anyai');
   if (isDefault) {
-    const stablePath = path.join(app.getPath('appData'), 'AnyAI');
+    const stablePath = path.join(app.getPath('appData'), 'anyai');
     fs.mkdirSync(stablePath, { recursive: true });
     app.setPath('userData', stablePath);
     if (path.resolve(session) === path.resolve(current)) app.setPath('sessionData', stablePath);
