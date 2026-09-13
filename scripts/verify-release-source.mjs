@@ -1,0 +1,14 @@
+import fs from 'node:fs';
+import {execFileSync} from 'node:child_process';
+const runId=process.env.SOURCE_RUN;
+if(!/^\d+$/.test(runId||''))throw new Error('Invalid source run');
+const version=JSON.parse(fs.readFileSync('package.json','utf8')).version;
+if(!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Invalid version');
+const tag=`v${version}`;
+const sha=execFileSync('git',['rev-parse',`refs/tags/${tag}^{}`],{encoding:'utf8'}).trim();
+const run=JSON.parse(execFileSync('gh',['api',`repos/${process.env.GH_REPO}/actions/runs/${runId}`],{encoding:'utf8'}));
+if(run.head_sha!==sha||run.event!=='push'||run.path!=='.github/workflows/release.yml')throw new Error('Artifacts must come from the original version tag Release build');
+const jobs=JSON.parse(execFileSync('gh',['api',`repos/${process.env.GH_REPO}/actions/runs/${runId}/jobs?per_page=100`],{encoding:'utf8'})).jobs;
+for(const name of ['Windows','macOS','Linux'])if(!jobs.some(j=>j.name===name&&j.conclusion==='success'))throw new Error(`Source platform build did not succeed: ${name}`);
+fs.appendFileSync(process.env.GITHUB_OUTPUT,`sha=${sha}\ntag=${tag}\n`);
+console.log(`Verified original source ${tag}: ${sha}`);

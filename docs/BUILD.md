@@ -149,6 +149,8 @@ Release 还包含 `SHA256SUMS.txt` 和 `release-manifest.json`，记录文件大
 
 可在 Actions 页手动触发：默认勾选 `dry_run` 只构建；发布必须选择对应版本标签并取消 `dry_run`。失败后可重跑工作流，已公开版本会拒绝再次上传。
 
+如果三个平台都构建成功，只有发布脚本需要修复，可修复并推送源码后运行 **Recover Release**，填写原 Release 的运行编号。恢复流程会核对原运行的源码提交与版本标签一致、三个平台均成功，再复用原安装包发布；不会移动版本标签。Linux 打包工具生成的 `x86_64.AppImage` / `amd64.deb` 文件会统一成 README 中的 `x64` 命名。
+
 **不需要配任何 secret。** 用的是 Actions 自带的 `GITHUB_TOKEN`，
 仓库地址 electron-builder 会从 `GITHUB_REPOSITORY` 环境变量自己认。
 
