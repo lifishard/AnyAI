@@ -7,11 +7,15 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { createTeamFiles } = require('../electron/team-files.cjs');
 function fixture(t) {
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'wickrun-team-files-test-'));
- t.after(()=>{assert.equal(path.dirname(dir),fs.realpathSync(os.tmpdir()));assert.ok(path.basename(dir).startsWith('wickrun-team-files-test-'));fs.rmSync(dir,{recursive:true,force:true});});
+ const tmpRoot=fs.realpathSync.native(os.tmpdir());
+ const dir=fs.mkdtempSync(path.join(tmpRoot,'wickrun-team-files-test-'));
+ t.after(()=>{assert.equal(path.dirname(dir),tmpRoot);assert.ok(path.basename(dir).startsWith('wickrun-team-files-test-'));fs.rmSync(dir,{recursive:true,force:true});});
  const project=path.join(dir,'project'),userData=path.join(dir,'data');fs.mkdirSync(project);fs.writeFileSync(path.join(project,'a.txt'),'before-a');fs.writeFileSync(path.join(project,'b.txt'),'before-b');
  const api=createTeamFiles(userData),rec=api.create({projectId:'p',taskId:'t',memberId:'m',root:project},[project]);
- return {dir,project,userData,api,rec};
+ // team-files canonicalizes roots with realpathSync.native. Reuse that exact
+ // persisted spelling so injected child-process hooks target the real root on
+ // Windows, where temp paths may differ by case or short/long form.
+ return {dir,project:rec.root,userData,api,rec};
 }
 const expected=rec=>rec.files.map(({path,beforeHash,afterHash})=>({path,beforeHash,afterHash}));
 test('merge exact diff and reject repeated action',t=>{

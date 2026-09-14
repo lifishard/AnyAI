@@ -11,9 +11,7 @@ function createLocalClients({ userData, collaboration, teamFiles, getSettings, o
   function binary(kind) {
     const settings = getSettings();
     if (kind === 'codex') {
-      const bin = settings.clients?.codexBin;
-      if (!bin || !path.isAbsolute(bin) || !fs.existsSync(bin)) throw Error('请先配置官方 Codex 原生客户端路径');
-      return bin;
+      return require('./client-discovery.cjs').discoverClient('codex',settings);
     }
     if (kind !== 'claude') throw Error('未知客户端');
     return (deps.resolveNative || resolveNative)(settings.tools?.claudeBin, process.env, process.platform);
@@ -86,7 +84,7 @@ function createLocalClients({ userData, collaboration, teamFiles, getSettings, o
     loginClients.get('codex')?.close(); const client = codexFactory({ binary: binary('codex'), cwd: scratch }); loginClients.set('codex', client);
     try {
       const result = await client.login(), url = new URL(result.authUrl);
-      if (url.protocol !== 'https:' || !['auth.openai.com', 'auth.chatgpt.com'].includes(url.hostname)) throw Error('官方登录地址无效');
+      if (url.protocol !== 'https:' || !['auth.openai.com', 'auth.chatgpt.com', 'chatgpt.com'].includes(url.hostname) || url.username || url.password) throw Error('官方登录地址无效');
       await openExternal(url.href); return { status: 'waiting_login', message: '请在官方浏览器页面完成登录，然后检查连接。' };
     } catch { client.close(); loginClients.delete('codex'); throw Error('无法打开官方客户端登录，请检查本机客户端。'); }
   }

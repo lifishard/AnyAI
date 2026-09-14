@@ -20,7 +20,7 @@ function safeExtraArgs(value) {
     const flag = tokens[i], raw = tokens[i + 1];
     const item = raw && raw.replace(/^(["'])(.*)\1$/, '$2');
     const valid = flag === '--model' ? /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(item || '')
-      : flag === '--effort' ? /^(low|medium|high|max)$/.test(item || '')
+      : flag === '--effort' ? /^(low|medium|high|xhigh|max)$/.test(item || '')
         : flag === '--max-turns' ? /^(?:[1-9]|[1-9][0-9]|100)$/.test(item || '') : false;
     if (!valid || seen.has(flag)) throw Error('Claude Code 附加参数仅支持 --model、--effort 和 --max-turns；权限、认证与执行参数须由接入配置管理。');
     seen.add(flag); result.push(flag, item);
@@ -77,7 +77,7 @@ function createClaudeCode(deps = {}) {
       };
       const cancel = () => stop('cancelled');
       try {
-        child = launch(command, ['-p', '--output-format', 'json', '--permission-mode', 'dontAsk', '--setting-sources', '', '--settings', '{"disableAllHooks":true}', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', ...extra], {
+        child = launch(command, ['-p', '--output-format', 'json', '--permission-mode', 'dontAsk', '--setting-sources', '', '--settings', '{"disableAllHooks":true}', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', ...(ctx.chatOnly ? ['--tools', '', '--disallowedTools', 'mcp__*'] : []), ...extra], {
           cwd, shell: false, windowsHide: true, detached: platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'], env: localLoginEnvironment(environment),
         });
       } catch { finish({ ...fail('无法启动 Claude Code 客户端'), execution: record('launch_failed') }); return; }

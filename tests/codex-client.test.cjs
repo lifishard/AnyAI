@@ -32,6 +32,20 @@ function fixture(custom = {}, settings = {}) {
 const terminal = (send, status = 'completed', threadId = 'thread-1', turnId = 'turn-1') => send({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status, error: status === 'failed' ? { message: 'quota reached' } : null } } });
 const ready = () => new Promise(resolve => setImmediate(resolve));
 
+test('conversation isolation disables external integrations and Chat command tools before starting a thread',async()=>{
+  const f=fixture({'config/read':(request,send)=>send({id:request.id,result:{config:{mcp_servers:{custom:{}},plugins:{community:{}}}}})});
+  const result=f.client.run({prompt:'Discuss only',sandbox:'readOnly',isolateTools:true});await ready();
+  const config=f.messages.find(m=>m.method==='thread/start').params.config;
+  assert.equal(config['features.shell_tool'],false);assert.equal(config['features.hooks'],false);assert.equal(config['features.apps'],false);
+  assert.equal(config['mcp_servers."custom".enabled'],false);assert.equal(config['plugins."community".enabled'],false);
+  terminal(f.send);assert.equal((await result).status,'completed');f.client.close();
+});
+
+test('conversation isolation fails before model dispatch if effective tool configuration cannot be verified',async()=>{
+  const f=fixture();const result=await f.client.run({prompt:'Discuss only',isolateTools:true});assert.equal(result.status,'failed');
+  assert.ok(!f.messages.some(m=>m.method==='turn/start'));f.client.close();
+});
+
 test('handshake and environment isolate subscription; only matched terminal completes', async () => {
   const f = fixture(); const events = [];
   const p = f.client.run({ prompt: 'hello', model: 'gpt-test', effort: 'high', sandbox: 'workspaceWrite', onEvent: e => events.push(e) });

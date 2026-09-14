@@ -52,6 +52,49 @@ const clip = (v: unknown, n = 48): string => {
 
 export const TOOLS: ToolDef[] = [
   {
+    name: 'request_user_input',
+    label: '询问用户',
+    group: 'agent',
+    description:
+      '当任务缺少用户偏好、关键选择或必要补充信息时，向用户展示问题卡片并等待回答。' +
+      'questions 必须是 1 到 3 个对象，每个对象包含稳定 id、question 和 options；options 可为空表示只收文字，最多 6 个选项。' +
+      '需要单选时省略 multiple，需要多选时设为 true。不要替用户预选、猜测或编造答案；有了答案后再继续任务。',
+    parameters: {
+      type: 'object',
+      properties: {
+        questions: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 3,
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: '稳定的问题标识' },
+              header: { type: 'string', description: '可选的小标题' },
+              question: { type: 'string', description: '要向用户显示的问题' },
+              options: {
+                type: 'array',
+                maxItems: 6,
+                items: {
+                  type: 'object',
+                  properties: {
+                    label: { type: 'string' },
+                    description: { type: 'string' },
+                  },
+                  required: ['label'],
+                },
+              },
+              multiple: { type: 'boolean', description: '是否允许多选' },
+            },
+            required: ['id', 'question', 'options'],
+          },
+        },
+      },
+      required: ['questions'],
+    },
+    summarize: () => '等待用户回答',
+  },
+  {
     name:'update_requirements',label:'记录交付要求',group:'agent',
     description:'复杂任务开始时记录用户要求与可检查条件，按 id 合并，遗漏项保留。sourceId 和 sourceQuote 必须来自原始用户消息。检查范围只能证明指定条件：file_exists 只证明文件存在；json 核对解析、顶层数组 count 和 requiredKeys；ics 核对基本格式和事件 count；answer_contains 只核对答案字面 contains；review 供开放式语义复核。覆盖完整性应另列 review 要求，不能用文件存在替代。修订会清除旧检查结果。',
     parameters:{type:'object',properties:{requirements:{type:'array',maxItems:20,items:{type:'object',properties:{

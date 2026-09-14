@@ -267,10 +267,15 @@ export function buildRequestBody(
     stream: cfg.stream,
   };
 
-  if (cfg.toolsEnabled && toolNames.length) {
+  // The question card is a renderer-owned interaction.  It is allowed in
+  // Chat even when host tools are disabled; every other tool still follows
+  // the normal toolsEnabled switch.
+  const questionTool = toolNames.includes('request_user_input') ? ['request_user_input'] : [];
+  const hostToolNames = toolNames.filter((name) => name !== 'request_user_input');
+  if (questionTool.length || (cfg.toolsEnabled && hostToolNames.length)) {
     // 排序是为了上下文缓存：缓存按前缀逐字节匹配，工具勾选顺序一变
     // 序列化出来的 tools 就变了，整段前缀跟着失配，缓存永远命中不了
-    body.tools = toolsPayload([...toolNames].sort());
+    body.tools = toolsPayload([...(cfg.toolsEnabled ? hostToolNames : []), ...questionTool].sort());
     body.tool_choice = 'auto';
   }
   if (cfg.stream) {

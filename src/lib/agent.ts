@@ -42,6 +42,12 @@ import { calibratedTokens, capabilities, observeInput, outputReserve, prepareBod
 import { compressionCandidate, memoryInstructions, memoryView, readContext, updatePlan, validateCompaction } from './context-memory';
 import { handoffInfo, repeatedWithoutProgress, type ConversationMemory } from './handoff';
 import { deliveryReport, recoveryInfo, updateRequirements, verifyRequirements } from './delivery';
+import {
+  formatUserAnswers,
+  parseUserQuestions,
+  validateUserAnswers,
+  type UserQuestionRequest,
+} from './user-questions';
 
 export interface AgentEvents {
   onContentDelta(s: string): void;
@@ -412,8 +418,20 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
   void (async () => {
     try {
       const usable = new Set(availableTools(args.canRunHostTools).map((t) => t.name));
-      const toolNames = cfg.toolsEnabled ? [...new Set([...cfg.enabledTools,
-        'read_context', 'read_tool_result', ...(cfg.runtime?.milestones === false && !state.milestones?.length && !state.requirements?.length ? [] : ['update_plan','update_requirements','verify_requirements'])])].filter((n) => usable.has(n) && TOOL_BY_NAME[n]) : [];
+      // request_user_input is renderer-owned and remains available in Chat;
+      // host tools continue to obey the Work/toolsEnabled switch.
+      const uiQuestionTool = usable.has('request_user_input') ? ['request_user_input'] : [];
+      const toolNames = [...new Set([
+        ...(cfg.toolsEnabled ? [
+          ...cfg.enabledTools,
+          'read_context',
+          'read_tool_result',
+          ...(cfg.runtime?.milestones === false && !state.milestones?.length && !state.requirements?.length
+            ? []
+            : ['update_plan', 'update_requirements', 'verify_requirements']),
+        ] : []),
+        ...uiQuestionTool,
+      ])].filter((n) => usable.has(n) && TOOL_BY_NAME[n]);
       if (cfg.toolsEnabled && !toolNames.length) {
         await finishPause('工具开关已开启，但没有可用工具', { ...pauseInfo('没有可用工具'), kind: 'tools_unsupported', fixes: ['在配置中选择至少一个当前平台可用的工具'] });
         return;
@@ -507,6 +525,19 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
               if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('参数必须是对象');
               parsed = value as Record<string, unknown>;
             } catch (e) { parseError = e instanceof Error ? e.message : String(e); }
+            let questionRequest: UserQuestionRequest | undefined;
+            let questionParseError: string | undefined;
+            if (call.name === 'request_user_input' && !parseError) {
+              try {
+                // Reuse the durable request on resume so the card and answer
+                // remain tied to the same call even if the model retries.
+                questionRequest = state.userQuestion?.callId === call.id
+                  ? state.userQuestion.request
+                  : parseUserQuestions(parsed, `question-${state.runId ?? args.requestId}-${call.id}`);
+              } catch (e) {
+                questionParseError = e instanceof Error ? e.message : String(e);
+              }
+            }
             if (!parseError && !state.replanPending && repeatedWithoutProgress(state,call.name,parsed)) {
               const blocked:ToolStep={id:`step-${state.runId}-${state.round}-${i}`,callId:call.id,name:call.name,args:parsed,
                 status:'denied',summary:'重复操作已暂停',output:'此操作未执行：连续相同操作没有新结果，请改用已有证据或调整方法。',startedAt:Date.now()};
@@ -526,7 +557,43 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
             await save(); // Cursor and intent must be durable before dispatch.
             let result: ToolResult;
             const resolving = state.uncertainCallId === call.id;
-            if (resolving && args.resolveUncertain === 'skip') {
+            const pendingQuestion = state.userQuestion?.callId === call.id ? state.userQuestion : undefined;
+            if (call.name === 'request_user_input') {
+              if (parseError || questionParseError || !questionRequest) {
+                result = { ok: false, content: '', error: `问题参数无效：${parseError ?? questionParseError ?? '无法建立问题请求'}` };
+              } else if (pendingQuestion?.answers) {
+                try {
+                  const answers = validateUserAnswers(questionRequest, pendingQuestion.answers);
+                  result = { ok: true, content: formatUserAnswers(questionRequest, answers), summary: '已收到用户回答' };
+                  state.userQuestionHistory = [
+                    ...(state.userQuestionHistory ?? []).filter((item) => item.request.id !== questionRequest!.id),
+                    { request: structuredClone(questionRequest), answers: structuredClone(answers), at: Date.now() },
+                  ];
+                  state.userQuestion = undefined;
+                  state.waitKind = undefined;
+                } catch (e) {
+                  // A malformed externally restored answer must not be
+                  // treated as a successful response or silently discarded.
+                  pendingQuestion.answers = undefined;
+                  result = { ok: false, content: '', error: e instanceof Error ? e.message : String(e) };
+                }
+              } else {
+                state.userQuestion = {
+                  request: structuredClone(questionRequest),
+                  callId: call.id,
+                  toolIndex: i,
+                  draft: pendingQuestion?.draft,
+                };
+                state.status = 'waiting';
+                state.waitKind = 'question';
+                state.reason = '等待用户回答';
+                step.summary = '等待用户回答';
+                events.onStep({ ...step });
+                await save();
+                await finishPause('等待用户回答');
+                return;
+              }
+            } else if (resolving && args.resolveUncertain === 'skip') {
               result = { ok: false, content: '', error: '用户已核实并选择跳过此操作，程序没有重新执行。' };
               step.status = 'denied';
             } else if (state.replanPending && !resolving) {
@@ -755,6 +822,11 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           const info = incomplete ? { ...pauseInfo(failure.message), kind: 'network' as const, retryable: true }
             : classifyError(failure.message, failure.status, { model: cfg.model, profileName: args.profileName, sentTools: toolNames.length > 0 });
           stat.failureKind=info.kind;
+          if(info.kind==='tools_unsupported' && !cfg.toolsEnabled && toolNames.length===1 && toolNames[0]==='request_user_input'){
+            toolNames.splice(0,1);
+            events.onNotice('此模型不支持提问卡片，正在继续普通聊天');
+            await save();continue;
+          }
           const recoveryLimit = policy.recoveryMinutes*60_000;
           const elapsed = Date.now()-recoveryStarted;
           const retryAllowed = args.autoRetry > 0 && info.retryable && (!incomplete || attempts <= args.autoRetry) && !budgetExceeded(reserved) &&

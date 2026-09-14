@@ -33,6 +33,8 @@ function groupOf(h: ModelHealth): ModelHealthStatus | 'muted' {
 }
 
 export default function ModelPicker(props: {
+  clientSlot?: React.ReactNode;
+  displayModel?: string;
   profiles: KeyProfile[];
   profileId: string | null;
   onProfile: (id: string) => void;
@@ -54,6 +56,8 @@ export default function ModelPicker(props: {
   onClearHealth: () => void;
 }) {
   const [open, setOpen] = React.useState(false);
+  const [source,setSource]=React.useState<'api'|'local'>(props.displayModel?'local':'api');
+  React.useEffect(()=>setSource(props.displayModel?'local':'api'),[props.displayModel]);
   const [q, setQ] = React.useState('');
   const [showBad, setShowBad] = React.useState(false);
   // 默认只看聊天模型：聚合网关会把 SD checkpoint、embedding、语音模型
@@ -196,12 +200,14 @@ export default function ModelPicker(props: {
         title={`当前模型：${props.model || '未选择'}\n凭据：${activeProfile?.name ?? '未选择'}`}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="model-btn-name">{props.model || '选模型'}</span>
+        <span className="model-btn-name">{props.displayModel || props.model || '选模型'}</span>
         <span className="model-btn-caret">▾</span>
       </button>
 
       {open ? (
         <AnchoredPopover anchorRef={anchorRef} onClose={() => setOpen(false)} className="popup picker" label="选择模型与凭据">
+          {props.clientSlot && <div className="connection-tabs" role="group" aria-label="模型连接方式"><button className={`btn sm ${source==='api'?'':'ghost'}`} onClick={()=>setSource('api')}>API 模型</button><button className={`btn sm ${source==='local'?'':'ghost'}`} onClick={()=>setSource('local')}>本机 AI</button></div>}
+          {source==='local' && props.clientSlot ? props.clientSlot : <>
           {/* 凭据 */}
           <div className="picker-section">
             <div className="picker-label">
@@ -435,6 +441,7 @@ export default function ModelPicker(props: {
               )}
             </div>
           </div>
+          </>}
         </AnchoredPopover>
       ) : null}
     </div>

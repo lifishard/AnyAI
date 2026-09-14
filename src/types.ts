@@ -1,5 +1,6 @@
 import type { EffortLevel, EffortMapping } from './lib/effort';
 import type { LearnedLimit } from './lib/limits';
+import type { UserQuestionAnswers, UserQuestionHistoryItem, UserQuestionRequest } from './lib/user-questions';
 
 /* ------------------------------------------------------------------ *
  * 全局数据模型
@@ -172,6 +173,7 @@ export interface ParamState {
 
 /** 一次会话的全部生成配置 */
 export interface GenerationConfig {
+  client?: import('./lib/connections').ClientSelection;
   model: string;
   stream: boolean;
   systemPrompt: string;
@@ -373,6 +375,8 @@ export interface ChatMessage {
   delivery?: DeliveryReport;
   taskId?: string;
   supplementalInputs?: {id:string;content:string;createdAt:number}[];
+  /** UI questions requested during this turn and answered by the user. */
+  userQuestionHistory?: UserQuestionHistoryItem[];
 }
 
 /** 中断现场。够用来无缝续跑，也够小到能塞进 localStorage */
@@ -424,7 +428,17 @@ export interface RunState {
   supplementalInputs?: {id:string;content:string;createdAt:number}[];
   replanPending?: boolean;
   pendingInputMessages?: ChatMessage[];
-  waitKind?: 'quota' | 'approval';
+  waitKind?: 'quota' | 'approval' | 'question';
+  /** The UI question currently blocking the tool cursor. */
+  userQuestion?: {
+    request: UserQuestionRequest;
+    callId: string;
+    toolIndex: number;
+    draft?: UserQuestionAnswers;
+    answers?: UserQuestionAnswers;
+  };
+  /** Completed UI questions remain available after the run resumes. */
+  userQuestionHistory?: UserQuestionHistoryItem[];
 }
 
 export interface HandoffInfo {
@@ -501,7 +515,7 @@ export interface RemoteConfig {
 }
 
 export interface AppSettings {
-  clients?: { codexBin:string };
+  clients?: { codexBin:string; kimiBin?:string };
   collaborationView?: { visible:boolean; projectId?:string };
   keyProfiles: KeyProfile[];
   activeKeyProfileId: string | null;

@@ -2,7 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {createCollaborationStore}=require('../electron/collaboration-store.cjs');
 const fixtureData=require('./team-store-fixtures.cjs');
-function fixture(t,withRun=false){const root=fs.mkdtempSync(path.join(os.tmpdir(),'wickrun-boundary-test-'));t.after(()=>{assert.equal(path.dirname(root),fs.realpathSync(os.tmpdir()));assert.ok(path.basename(root).startsWith('wickrun-boundary-test-'));fs.rmSync(root,{recursive:true,force:true});});const store=createCollaborationStore(root),p=fixtureData.project(root);store.update(0,p);if(withRun){p.runs.push(fixtureData.run(p));store.update(1,p);}return {root,store};}
+function fixture(t,withRun=false){const tmpRoot=fs.realpathSync.native(os.tmpdir()),root=fs.mkdtempSync(path.join(tmpRoot,'wickrun-boundary-test-'));t.after(()=>{assert.equal(path.dirname(root),tmpRoot);assert.ok(path.basename(root).startsWith('wickrun-boundary-test-'));fs.rmSync(root,{recursive:true,force:true});});const store=createCollaborationStore(root),p=fixtureData.project(root);store.update(0,p);if(withRun){p.runs.push(fixtureData.run(p));store.update(1,p);}return {root,store};}
 function update(store,fn){const data=store.read(),p=data.projects.p;fn(p.runs[0],p);return store.update(data.revision,p);}
 
 test('new run cannot forge roots connections members task or a saved graph version',t=>{

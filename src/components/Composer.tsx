@@ -14,6 +14,8 @@ import type { ProjectPrompt } from '../lib/projects';
 import { matchSkills, slashQuery } from '../lib/skills';
 import EffortPicker from './EffortPicker';
 import ModelPicker from './ModelPicker';
+import ClientConnections from './ClientConnections';
+import {CLIENT_LABELS} from '../lib/connections';
 import ContextMeter, { type ContextPreview } from './ContextMeter';
 import { routeKey } from '../lib/adaptive';
 
@@ -38,6 +40,10 @@ const APPROVAL_OPTIONS: { value: ApprovalMode; label: string; desc: string }[] =
 type SendMode = 'chat' | 'work';
 
 export default function Composer(props: {
+  client?:import('../lib/connections').ClientSelection;
+  onClient?:(client:import('../lib/connections').ClientSelection|undefined)=>void;
+  connectionSettings?:import('../types').AppSettings;
+  onConnectionSettings?:(patch:Partial<import('../types').AppSettings>)=>void;
   contextPreview?: ContextPreview;
   quotes: import('../types').MessageQuote[];
   quoteOnly: boolean;
@@ -479,6 +485,8 @@ export default function Composer(props: {
             </div>
 
             <ModelPicker
+              clientSlot={props.connectionSettings && props.onClient && props.onConnectionSettings ? <ClientConnections selection={props.client} onSelect={props.onClient} settings={props.connectionSettings} onSettings={props.onConnectionSettings}/> : undefined}
+              displayModel={props.client ? `${CLIENT_LABELS[props.client.kind]} · ${props.client.model==='default'?'默认':props.client.model}` : undefined}
               profiles={props.profiles}
               profileId={props.profileId}
               onProfile={props.onProfile}
@@ -536,7 +544,7 @@ export default function Composer(props: {
               </button>
             </div>
 
-            <EffortPicker
+            {props.client ? <span className="chip" title="在模型选择器中调整官方客户端提供的思考强度">{props.client.effort || '官方默认强度'}</span> : <EffortPicker
               level={props.effortLevel}
               onLevel={props.onEffortLevel}
               model={props.model}
@@ -544,7 +552,7 @@ export default function Composer(props: {
               route={props.contextPreview?.profile.routeProfiles?.[routeKey(props.contextPreview.profile,props.model)]}
               manual={props.effortManual}
               onOpenMappings={props.onOpenMappings}
-            />
+            />}
 
             {props.busy ? (
               <>

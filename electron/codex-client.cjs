@@ -174,7 +174,7 @@ function createCodexClient({ binary, cwd, spawn = nativeSpawn, env = process.env
     await start();
     const value = await request('account/login/start', { type: 'chatgpt' });
     const url = new URL(value.authUrl);
-    if (url.protocol !== 'https:' || !['auth.openai.com', 'auth.chatgpt.com'].includes(url.hostname)) throw Error('Codex returned an unexpected login address.');
+    if (url.protocol !== 'https:' || !['auth.openai.com', 'auth.chatgpt.com', 'chatgpt.com'].includes(url.hostname) || url.username || url.password) throw Error('Codex returned an unexpected login address.');
     return { type: 'chatgpt', loginId: value.loginId, authUrl: value.authUrl };
   }
   async function readRateLimits() { await start(); return request('account/rateLimits/read'); }
@@ -202,7 +202,16 @@ function createCodexClient({ binary, cwd, spawn = nativeSpawn, env = process.env
         const account = await readAccount();
         if (state.settled) return;
         if (account.account?.type !== 'chatgpt') { finish('failed', 'Sign in through the official Codex ChatGPT login before using this subscription route. API-key authentication is not accepted.'); return; }
-        const config = { cwd: project, modelProvider: 'openai', approvalPolicy: 'untrusted', approvalsReviewer: 'user', sandbox: sandbox === 'readOnly' ? 'read-only' : 'workspace-write', ...(options.model ? { model: options.model } : {}) };
+        let isolatedConfig;
+        if(options.isolateTools){
+          const effective=await request('config/read',{includeLayers:false,cwd:project});
+          if(!effective.config || typeof effective.config!=='object')throw Error('Cannot verify local tool configuration for this connection.');
+          isolatedConfig={'features.apps':false,'features.hooks':false,'features.codex_hooks':false,'features.multi_agent':false,'features.skill_mcp_dependency_install':false,'features.browser_use':false,'features.computer_use':false,'web_search':'disabled'};
+          for(const name of Object.keys(effective.config.mcp_servers || {}))isolatedConfig[`mcp_servers.${JSON.stringify(name)}.enabled`]=false;
+          for(const name of Object.keys(effective.config.plugins || {}))isolatedConfig[`plugins.${JSON.stringify(name)}.enabled`]=false;
+          if(sandbox==='readOnly')Object.assign(isolatedConfig,{'features.shell_tool':false,'features.unified_exec':false,'features.apply_patch_freeform':false});
+        }
+        const config = { cwd: project, modelProvider: 'openai', approvalPolicy: 'untrusted', approvalsReviewer: 'user', sandbox: sandbox === 'readOnly' ? 'read-only' : 'workspace-write', ...(options.model ? { model: options.model } : {}),...(isolatedConfig?{config:isolatedConfig}:{}) };
         const thread = await request(state.threadId ? 'thread/resume' : 'thread/start', { ...config, ...(state.threadId ? { threadId: state.threadId } : {}) });
         if (state.settled) return;
         if (typeof thread.thread?.id !== 'string' || !thread.thread.id || (state.threadId && thread.thread.id !== state.threadId)) throw Error('Codex did not return the requested thread.');

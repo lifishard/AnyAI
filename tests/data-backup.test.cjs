@@ -8,8 +8,9 @@ const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { createDataBackup, LIMITS } = require('../electron/data-backup.cjs');
 function fixture(t) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wickrun-backup-test-'));
-  t.after(() => { assert.equal(path.dirname(dir), fs.realpathSync(os.tmpdir())); assert.ok(path.basename(dir).startsWith('wickrun-backup-test-')); fs.rmSync(dir, { recursive: true, force: true }); });
+  const tmpRoot = fs.realpathSync.native(os.tmpdir());
+  const dir = fs.mkdtempSync(path.join(tmpRoot, 'wickrun-backup-test-'));
+  t.after(() => { assert.equal(path.dirname(dir), tmpRoot); assert.ok(path.basename(dir).startsWith('wickrun-backup-test-')); fs.rmSync(dir, { recursive: true, force: true }); });
   return dir;
 }
 function write(root, name, value) { const file = path.join(root, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value)); }

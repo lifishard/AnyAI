@@ -24,6 +24,7 @@ let dataBackup = null;
 let restoringData = false;
 let storageStartupError = null;
 let localClients = null;
+let conversationClients = null;
 const activeToolControllers = new Map();
 function dataAvailable(){if(storageStartupError)throw Error('本地记录需要恢复，已停止读写：'+storageStartupError);if(restoringData)throw Error('正在恢复数据，请等待重启');const error=dataBackup?.recoveryError;if(error)throw Error('数据恢复未完成，已停止读写：'+error);}
 
@@ -322,17 +323,23 @@ function registerIpc() {
     const bundle=fs.readFileSync(file,'utf8'),summary=dataBackup.preview({bundle}),token=require('node:crypto').randomUUID();importedBackups.clear();importedBackups.set(token,bundle);return {input:{token},summary};
   });
   ipcMain.handle('snc:backupRestore',(_e,input)=>{
-    if(inflight.size||activeToolControllers.size||localClients?.busy())throw Error('还有模型或工具操作正在结束，请等待完成后恢复');
+    if(inflight.size||activeToolControllers.size||localClients?.busy()||conversationClients?.busy())throw Error('还有模型或工具操作正在结束，请等待完成后恢复');
     const source=input?.id?{id:input.id}:input?.token&&importedBackups.has(input.token)?{bundle:importedBackups.get(input.token)}:null;if(!source)throw Error('请先预览要恢复的备份');
     restoringData=true;try{dataBackup.restore(source);app.relaunch();app.exit(0);}catch(error){restoringData=false;throw error;}
   });
-  ipcMain.handle('snc:toolAbort',(_e,runId)=>{localClients?.abort(runId);for(const rec of activeToolControllers.values())if(rec.runId===runId||rec.teamRunId===runId)rec.controller.abort();});
+  ipcMain.handle('snc:toolAbort',(_e,runId)=>{conversationClients?.abort(runId);localClients?.abort(runId);for(const rec of activeToolControllers.values())if(rec.runId===runId||rec.teamRunId===runId)rec.controller.abort();});
   const collaboration = require('./collaboration-store.cjs').createCollaborationStore(app.getPath('userData'));
   const teamFiles = require('./team-files.cjs').createTeamFiles(app.getPath('userData'));
   try{if(!dataBackup.recoveryError)localClients=require('./local-clients.cjs').createLocalClients({userData:app.getPath('userData'),collaboration,teamFiles,getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),openExternal:url=>shell.openExternal(url)});}catch(error){storageStartupError=String(error);}
   ipcMain.handle('snc:pickClientBinary',async()=>{const chosen=await dialog.showOpenDialog(mainWindow,{title:'选择官方原生客户端',properties:['openFile'],...(process.platform==='win32'?{filters:[{name:'原生程序',extensions:['exe']}]}:{})});return chosen.canceled?null:chosen.filePaths[0];});
   ipcMain.handle('snc:clientCheck',(_e,kind)=>{dataAvailable();if(!['codex','claude'].includes(kind))throw Error('未知客户端');return localClients.check(kind);});
   ipcMain.handle('snc:clientLogin',()=>{dataAvailable();return localClients.login();});
+  conversationClients=require('./conversation-clients.cjs').createConversationClients({userData:app.getPath('userData'),getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),store:runtimeStore(),openExternal:url=>shell.openExternal(url)});
+  ipcMain.handle('snc:conversationClientCheck',(_e,kind)=>{dataAvailable();return conversationClients.check(kind);});
+  ipcMain.handle('snc:conversationClientConnect',(_e,kind)=>{dataAvailable();return conversationClients.connect(kind);});
+  ipcMain.handle('snc:conversationClientRun',(event,args)=>{dataAvailable();return conversationClients.run(args,message=>event.sender.send('snc:clientEvent',message));});
+  ipcMain.handle('snc:conversationClientApprove',(_e,{requestId,id,approved})=>conversationClients.approve(requestId,id,approved));
+  ipcMain.handle('snc:conversationClientRecover',(_e,{runId,callId})=>{dataAvailable();return conversationClients.recover(runId,callId);});
   ipcMain.handle('snc:clientRun',(_e,args)=>{dataAvailable();return localClients.run(args);});
   ipcMain.handle('snc:clientApprove',(_e,{id,approved})=>localClients.approve(id,approved));
   ipcMain.handle('snc:teamFilesCreate', (_e,args) => { dataAvailable();return require('./team-execution-guard.cjs').createTeamExecutionGuard({collaboration,teamFiles}).createFileSession(args); });
@@ -500,6 +507,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     localClients?.close();
+    conversationClients?.close();
     for (const [, rec] of inflight) {
       clearTimeout(rec.timer);
       rec.controller.abort('quit');

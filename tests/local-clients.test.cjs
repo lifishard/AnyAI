@@ -4,7 +4,9 @@ const fs = require('node:fs'), os = require('node:os'), path = require('node:pat
 const { createLocalClients } = require('../electron/local-clients.cjs');
 const clone = value => structuredClone(value);
 function fixture(t, configure = () => {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wickrun-local-client-test-'));
+  const tmpRoot = fs.realpathSync.native(os.tmpdir());
+  const root = fs.mkdtempSync(path.join(tmpRoot, 'wickrun-local-client-test-'));
+  const mockBinary=path.join(root,'codex.exe');fs.writeFileSync(mockBinary,'');
   const calls = [], clients = [], sessions = new Map(); let writes = 0;
   const members = [1, 2].map(n => ({ id: 'm' + n, name: 'Member ' + n, enabled: true, connectionId: 'client:codex', model: 'test-model', effort: 'high', tools: [], maxTokens: 100, maxMinutes: 1 }));
   let data = { revision: 0, projects: { p: { id: 'p', files: [], runs: [{ id: 'r', status: 'running', members, projectSettings: { allowedConnections: ['client:codex', 'client:claude'], roots: [root], maxConcurrent: 2 }, version: { graph: { maxTokens: 1000, maxMinutes: 2, nodes: [1, 2].map(n => ({ id: 'n' + n, type: 'agent', memberId: 'm' + n })) } }, tokens: 0, reservations: { 'a1:m1': 100, 'a2:m2': 100 }, attempts: [1, 2].map(n => ({ id: 'a' + n, nodeId: 'n' + n, status: 'running', output: '' })), events: [] }] } } };
@@ -25,8 +27,8 @@ function fixture(t, configure = () => {}) {
       },
     }; clients.push(client); return client;
   };
-  const manager = createLocalClients({ userData: root, collaboration: store, teamFiles: { get: id => clone(sessions.get(id)) }, getSettings: () => ({ clients: { codexBin: __filename } }), openExternal: async () => {}, deps: { createCodexClient: factory, pollMs: 10 } });
-  t.after(() => { manager.close(); assert.equal(path.dirname(root), fs.realpathSync(os.tmpdir())); assert.ok(path.basename(root).startsWith('wickrun-local-client-test-')); fs.rmSync(root, { recursive: true, force: true }); });
+  const manager = createLocalClients({ userData: root, collaboration: store, teamFiles: { get: id => clone(sessions.get(id)) }, getSettings: () => ({ clients: { codexBin: mockBinary } }), openExternal: async () => {}, deps: { createCodexClient: factory, pollMs: 10 } });
+  t.after(() => { manager.close(); assert.equal(path.dirname(root), tmpRoot); assert.ok(path.basename(root).startsWith('wickrun-local-client-test-')); fs.rmSync(root, { recursive: true, force: true }); });
   return { manager, calls, clients, sessions, root, get: () => data.projects.p.runs[0], project: () => data.projects.p, writes: () => writes, start(n = 1, extra = {}) { return manager.run({ projectId: 'p', runId: 'r', attemptId: 'a' + n, memberId: 'm' + n, prompt: 'Do this', ...extra }); } };
 }
 function ask(f, index = 0) {

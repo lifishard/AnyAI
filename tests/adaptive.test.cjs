@@ -155,7 +155,7 @@ test('Chat to Work keeps decisions, attachments and saved context while enabling
     attachments:[{id:'brief',kind:'text',name:'brief.txt',text:'附件约束：仅向已报名用户发布。',mime:'text/plain',size:40}]};
   const chatConfig={...cfg(),toolsEnabled:false,enabledTools:['read_file']};
   const chat=harness(async(init,e)=>{
-    assert.ok(!init.body.tools?.length);
+    assert.deepEqual((init.body.tools ?? []).map(t=>t.function.name),['request_user_input']);
     response(e,'决定：使用精简中文，发布时间为周五。');
   },{history:[question],config:chatConfig});
   await chat.finished;assert.equal(chat.log.done,1);
@@ -172,6 +172,16 @@ test('Chat to Work keeps decisions, attachments and saved context while enabling
   assert.equal(work.log.states.at(-1).handoff.mode,'followup');
   assert.equal(chatConfig.toolsEnabled,false);
   assert.equal(history[0].attachments[0].text,'附件约束：仅向已报名用户发布。');
+});
+
+test('Chat can continue on a model that explicitly rejects the optional question tool',async()=>{
+  let count=0;
+  const h=harness(async(init,e)=>{
+    count++;
+    if(count===1){assert.equal(init.body.tools[0].function.name,'request_user_input');e.onError('This model does not support tools',400);e.onDone();}
+    else{assert.ok(!init.body.tools);response(e,'普通聊天仍然可用。');}
+  },{config:{...cfg(),toolsEnabled:false,enabledTools:[]}});
+  await h.finished;assert.equal(h.log.done,1);assert.equal(count,2);
 });
 
 test('agent performs same-route compaction, accounts its usage and keeps unfinished milestones from ending a task', async () => {

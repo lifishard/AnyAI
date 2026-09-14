@@ -18,6 +18,7 @@ import type {
   ToolResult,
   ToolStep,
 } from './types';
+import { validateUserAnswers, type UserQuestionAnswers } from './lib/user-questions';
 import { SEED_MODELS, buildHeaders, endpoint, fetchModels, previewBody } from './lib/api';
 import { PROBE_SPACING_MS, probe400, probeHistory, type ProbeStep } from './lib/probe400';
 import { formatExchange, failedExchange, exchangeOf, importExchanges } from './lib/wiretap';
@@ -27,7 +28,8 @@ import { conversationMemory } from './lib/handoff';
 import { capabilities, outputReserve, quotaKey, routeKey, workingBudget } from './lib/adaptive';
 import { addRunInput } from './lib/delivery';
 import { limitKey, mergeLearnedLimit, pacingFloor, estimateRequestTokens } from './lib/limits';
-import { buildWire, runAgent, type AgentHandle } from './lib/agent';
+import { buildWire, type AgentHandle } from './lib/agent';
+import { runConnectedAgent } from './lib/connected-agent';
 import {
   clearHealth,
   mergeProbe,
@@ -171,6 +173,8 @@ export default function App() {
   const [queuePaused, setQueuePaused] = React.useState(false);
   const startingRef = React.useRef(false);
   const runningRef = React.useRef<{ requestId: string; convId: string; handle: AgentHandle } | null>(null);
+  const questionDraftSaveRef = React.useRef(Promise.resolve());
+  const questionSubmitRef = React.useRef(new Set<string>());
 
   const toast = useToast();
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -820,6 +824,8 @@ export default function App() {
   const send = React.useCallback(
     async (text: string, replaceFromIndex?: number, resumeFrom?: RunState, queuedInput?: QueuedInput, resolution?: 'skip' | 'retry') => {
       if (!settings) return;
+      const nativeClient=(active?.config ?? settings.defaultConfig).client;
+      const profile:KeyProfile|null=nativeClient ? {id:`client:${nativeClient.kind}`,name:nativeClient.kind,baseUrl:'',hasSecret:false,extraHeaders:{},createdAt:0} : settings.keyProfiles.find(p=>p.id===active?.keyProfileId) ?? settings.keyProfiles.find(p=>p.id===settings.activeKeyProfileId) ?? settings.keyProfiles[0] ?? null;
       if (startingRef.current || busy || runningRef.current) {
         setQueue((q) => [...q, queuedInput ?? { toolsEnabled:config?.toolsEnabled, text, attachments: [...attachments], quotes: [...quotes], quoteOnly, conversationId: active?.id ?? null }]);
         setAttachments([]); setQuotes([]);
@@ -830,7 +836,7 @@ export default function App() {
       }
       startingRef.current = true;
       let apiKey: string | null;
-      try { apiKey = await secretGet(profile.id); }
+      try { apiKey = nativeClient ? 'official-client' : await secretGet(profile.id); }
       catch (e) { startingRef.current = false; toast.show(String(e)); return; }
       if (!apiKey) { startingRef.current = false; toast.show('这份凭据还没填 API Key'); setSettingsOpen(true); return; }
       // 没有会话就现开一个
@@ -928,7 +934,7 @@ export default function App() {
         if (runningRef.current?.requestId === requestId) { runningRef.current = null; setBusy(null); }
         startingRef.current = false;
       };
-      const handle = runAgent({
+      const handle = runConnectedAgent({
         requestId,
         profile,
         apiKey,
@@ -983,7 +989,7 @@ export default function App() {
             const def = TOOL_BY_NAME[step.name];
             // 「自动批准编辑」只放行改文件和 Chrome；
             // 跑命令和 Claude Code 影响面太大，这一档仍然要问
-            const heavy = def?.group === 'shell' || def?.group === 'agent';
+            const heavy = step.name === 'native_client_operation' || def?.group === 'shell' || def?.group === 'agent';
             if (!heavy) return Promise.resolve(true);
           }
           return new Promise<boolean>((resolve) => setConfirmReq({ step, resolve }));
@@ -1027,7 +1033,7 @@ export default function App() {
                 title: nextConv.title, state });
             }
             patchMessage(convId, answerMsg.id, { runState: state ?? undefined,
-              ...(state ? { milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery, taskId:state.runId, supplementalInputs:state.supplementalInputs, handoff:state.handoff } : {}) });
+              ...(state ? { milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery, taskId:state.runId, supplementalInputs:state.supplementalInputs, handoff:state.handoff, userQuestionHistory: state.userQuestionHistory } : {}) });
           },
           onPaused(reason) {
             finishUi(); setQueuePaused(true);
@@ -1116,6 +1122,63 @@ export default function App() {
       void send(question, undefined, state, undefined, resolution);
     }, [busy, active, send],
   );
+
+  /** Save a pending question draft in both the visible conversation and run journal. */
+  const saveQuestionDraft = React.useCallback((msg: ChatMessage, draft: UserQuestionAnswers) => {
+    if (!active || !msg.runState?.userQuestion) return;
+    const state = structuredClone(msg.runState);
+    if (!state.userQuestion) return;
+    state.userQuestion.draft = structuredClone(draft);
+    state.at = Date.now();
+    patchMessage(active.id, msg.id, {
+      runState: state,
+      userQuestionHistory: state.userQuestionHistory,
+    });
+    const saved = runRecord(state.runId ?? '');
+    if (!saved) return;
+    questionDraftSaveRef.current = questionDraftSaveRef.current
+      .catch(() => {})
+      .then(() => saveRun({ ...saved, state }))
+      .catch(reportSaveError);
+  }, [active]);
+
+  /** Validate once, persist the answer, then resume the same tool cursor. */
+  const submitQuestion = React.useCallback((msg: ChatMessage, answers: UserQuestionAnswers) => {
+    if (busy || !active || !msg.runState?.userQuestion) return;
+    const pending = msg.runState.userQuestion;
+    const key = `${msg.runState.runId ?? msg.id}:${pending.callId}`;
+    if (questionSubmitRef.current.has(key) || pending.answers) return;
+    let normalized: UserQuestionAnswers;
+    try {
+      normalized = validateUserAnswers(pending.request, answers);
+    } catch (error) {
+      toast.show(error instanceof Error ? error.message : '回答无效，请检查后重试', 5000);
+      return;
+    }
+    questionSubmitRef.current.add(key);
+    const state = structuredClone(msg.runState);
+    if (!state.userQuestion) return;
+    state.userQuestion.answers = structuredClone(normalized);
+    state.userQuestion.draft = structuredClone(normalized);
+    state.reason = '已收到回答，正在继续';
+    patchMessage(active.id, msg.id, {
+      runState: state,
+      userQuestionHistory: state.userQuestionHistory,
+    });
+    const index = active.messages.findIndex((item) => item.id === msg.id);
+    const question = index > 0 ? active.messages[index - 1]?.content ?? '继续' : '继续';
+    const saved = runRecord(state.runId ?? '');
+    questionDraftSaveRef.current = questionDraftSaveRef.current
+      .catch(() => {})
+      .then(async () => {
+        if (saved) await saveRun({ ...saved, state });
+        await send(question, undefined, state);
+      })
+      .catch((error) => {
+        questionSubmitRef.current.delete(key);
+        toast.show(error instanceof Error ? error.message : String(error), 5000);
+      });
+  }, [busy, active, send, toast]);
 
   // 上一轮结束后自动发下一条排队的
   React.useEffect(() => {
@@ -1280,7 +1343,11 @@ export default function App() {
 
   const composer = (
     <Composer
-      contextPreview={profile ? { profile,config,history:(active?.messages ?? []).filter(m => !m.pending),
+      client={config.client}
+      onClient={client=>setConfig({client,model:client?client.model:models[0]?.id || ''})}
+      connectionSettings={settings}
+      onConnectionSettings={patch=>setSettings(s=>s?{...s,...patch}:s)}
+      contextPreview={profile && !config.client ? { profile,config,history:(active?.messages ?? []).filter(m => !m.pending),
         extraSystem:[projectSystemBlock(activeProject),skillSystemBlock(activeSkills)].filter(Boolean).join('\n\n'),
         toolNames,mappings:settings.effortMappings,learned:settings.modelLimits?.[limitKey(profile.id,config.model,profile.baseUrl)],
         modelInfo:models.find(m => m.id === config.model), current:busy ? [...(active?.messages ?? [])].reverse().find(m => m.pending)?.contextSnapshot : undefined } : undefined}
@@ -1316,10 +1383,10 @@ export default function App() {
       onApprovalMode={(m: ApprovalMode) => setConfig({ approvalMode: m })}
       profiles={settings.keyProfiles}
       profileId={profile?.id ?? null}
-      onProfile={setProfileForConversation}
+      onProfile={id=>{setConfig({client:undefined});setProfileForConversation(id);}}
       models={models}
       model={config.model}
-      onModel={(id) => setConfig({ model: id })}
+      onModel={(id) => setConfig({ model: id,client:undefined })}
       modelsLoading={modelsLoading}
       modelsError={modelsError}
       onRefreshModels={() => void refreshModels()}
@@ -1501,6 +1568,8 @@ export default function App() {
                     onResume={busy || !t.a?.runState ? undefined : () => resumeRun(t.a!)}
                     onResumeWithInput={busy || !t.a?.runState ? undefined : (text) => resumeRun(t.a!,undefined,text)}
                     onResolveUncertain={busy || !t.a?.runState ? undefined : (choice) => resumeRun(t.a!, choice)}
+                    onQuestionSubmit={busy || !t.a?.runState?.userQuestion ? undefined : (answers) => submitQuestion(t.a!, answers)}
+                    onQuestionDraft={!t.a?.runState?.userQuestion ? undefined : (draft) => saveQuestionDraft(t.a!, draft)}
                     onSaveAnnotation={saveAnnotation}
                     onDeleteAnnotation={(messageId, noteId) => changeAnnotation(messageId, noteId)}
                     onEditQuestion={

@@ -1,5 +1,6 @@
 import React from 'react';
 import type { Artifact, ChatMessage, ErrorInfo, MessageAnnotation, SourceRef, ToolStep } from '../types';
+import type { UserQuestionAnswers } from '../lib/user-questions';
 import { typeOfPath } from '../lib/artifacts';
 import { ArtifactStrip } from './ArtifactPanel';
 import { TOOL_BY_NAME } from '../lib/tools/registry';
@@ -10,6 +11,7 @@ import MilestonePanel from './MilestonePanel';
 import DeliveryPanel from './DeliveryPanel';
 import RecoveryCard from './RecoveryCard';
 import TaskFeedback from './TaskFeedback';
+import UserQuestionCard from './UserQuestionCard';
 
 /** finish_reason 的人话注解，鼠标悬停时显示 */
 const STOP_HINT: Record<string, string> = {
@@ -221,6 +223,8 @@ export default function AnswerBlock(props: {
   onResume?: () => void;
   onResumeWithInput?: (text:string) => void;
   onResolveUncertain?: (choice: 'skip' | 'retry') => void;
+  onQuestionSubmit?: (answers: UserQuestionAnswers) => void;
+  onQuestionDraft?: (answers: UserQuestionAnswers) => void;
   onSaveAnnotation: (note: MessageAnnotation) => Promise<void>;
   onDeleteAnnotation: (messageId: string, noteId: string) => Promise<void>;
   onEditQuestion?: (text: string) => void;
@@ -337,11 +341,31 @@ export default function AnswerBlock(props: {
       {answer?.notice ? <div className="answer-notice">{answer.notice}</div> : null}
       {answer?.supplementalInputs?.length ? <details className="delivery-panel"><summary>已补充的信息 · {answer.supplementalInputs.length} 条</summary>{answer.supplementalInputs.map(m=><blockquote key={m.id}>{m.content}</blockquote>)}</details>:null}
 
+      {answer?.userQuestionHistory?.map((item) => (
+        <UserQuestionCard
+          key={`${item.request.id}-${item.at}`}
+          request={item.request}
+          answers={item.answers}
+          disabled
+          onSubmit={() => {}}
+        />
+      ))}
+      {answer?.runState?.userQuestion && !answer.pending ? (
+        <UserQuestionCard
+          request={answer.runState.userQuestion.request}
+          answers={answer.runState.userQuestion.answers}
+          draft={answer.runState.userQuestion.draft}
+          disabled={!props.onQuestionSubmit}
+          onSubmit={(answers) => props.onQuestionSubmit?.(answers)}
+          onDraft={(draft) => props.onQuestionDraft?.(draft)}
+        />
+      ) : null}
+
       {/*
         断线保护的入口。放在错误卡**上面**：先告诉人「东西还在」，
         再让他看出了什么事 —— 顺序反过来的话，人已经准备重问了
       */}
-      {answer?.runState && !answer.pending && props.onResume ? (
+      {answer?.runState && (!answer.runState.userQuestion || answer.runState.userQuestion.answers) && !answer.pending && props.onResume ? (
         <RecoveryCard state={answer.runState} onResume={props.onResume} onAddInput={props.onResumeWithInput} onResolve={props.onResolveUncertain}/>
       ) : null}
 
