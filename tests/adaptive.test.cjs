@@ -12,6 +12,42 @@ const pacer = load(file('src/lib/pacer.ts'));
 const cfg = () => ({ ...schema.defaultGenerationConfig(),model:'qa-model' });
 const profile = { id:'qa',baseUrl:'https://gateway.test/v1',name:'QA' };
 
+test('new defaults are open ended and legacy defaults migrate once', () => {
+  const fresh=schema.defaultGenerationConfig();
+  assert.equal(fresh.runtime.contextTokens,1000000);
+  assert.equal(fresh.runtime.maxTokens,0);
+  assert.equal(fresh.params.temperature.enabled,false);
+  assert.equal(schema.buildRequestBody(fresh,[],[],[]).temperature,undefined);
+
+  const {runtimeMigrationVersion: _freshMigration, ...legacyRuntimeDefaults}=fresh.runtime;
+  const old={...fresh,
+    params:{...fresh.params,temperature:{enabled:true,value:0.8}},
+    runtime:{...legacyRuntimeDefaults,contextTokens:24000,contextMode:'manual',maxTokens:300000},
+  };
+  const migrated=schema.mergeParamDefaults(old);
+  assert.equal(migrated.runtime.contextTokens,1000000);
+  assert.equal(migrated.runtime.maxTokens,0);
+  assert.equal(migrated.params.temperature.enabled,false);
+  assert.equal(migrated.runtime.runtimeMigrationVersion,2);
+
+  const edited={...migrated,
+    params:{...migrated.params,temperature:{enabled:true,value:0.8}},
+    runtime:{...migrated.runtime,contextTokens:24000,maxTokens:300000},
+  };
+  const reloaded=schema.mergeParamDefaults(edited);
+  assert.equal(reloaded.runtime.contextTokens,24000);
+  assert.equal(reloaded.runtime.maxTokens,300000);
+  assert.equal(reloaded.params.temperature.enabled,true);
+
+  const custom=schema.mergeParamDefaults({...fresh,
+    params:{...fresh.params,temperature:{enabled:true,value:0.7}},
+    runtime:{...fresh.runtime,contextTokens:50000,maxTokens:123456},
+  });
+  assert.equal(custom.runtime.contextTokens,50000);
+  assert.equal(custom.runtime.maxTokens,123456);
+  assert.equal(custom.params.temperature.enabled,true);
+});
+
 test('window × effort matrix keeps unknown distinct, reserves reasoning once and respects manual caps', () => {
   for (const window of [undefined,32768,262144,1048576]) for (const effort of ['off','low','medium','high','xhigh','max']) {
     const c = cfg(); c.effortLevel=effort;
@@ -19,18 +55,31 @@ test('window × effort matrix keeps unknown distinct, reserves reasoning once an
     const body=a.prepareBody(schema.buildRequestBody(c,[],[],[]),c,cap);
     const reserve=a.outputReserve(body,c,cap), budget=a.workingBudget(c,cap,reserve);
     assert.equal(cap.contextWindow,window);
-    if (!window) assert.equal(budget,24000);
-    else assert.ok(budget+reserve+1024<=window);
-    if (window>=262144) assert.equal(budget,96000);
+    assert.equal(budget,1000000);
+    const hard=a.hardWorkingBudget(cap,reserve);
+    if (!window) assert.equal(hard,Infinity);
+    else assert.ok(hard+reserve+1024<=window);
     c.runtime.contextMode='manual';c.runtime.contextTokens=70000;
-    assert.ok(a.workingBudget(c,cap,reserve)<=70000);
+    assert.equal(a.workingBudget(c,cap,reserve),70000);
+    c.runtime.contextMode='auto';
+    assert.equal(a.workingBudget(c,cap,reserve),70000);
   }
   const c=cfg();c.effortLevel='high';
   const body={model:c.model,max_completion_tokens:30000,thinking:{type:'enabled',budget_tokens:20000}};
   assert.equal(a.outputReserve(body,c,{}),30000);
-  assert.equal(a.workingBudget(c,{contextWindow:32768},30000),1744);
+  assert.equal(a.hardWorkingBudget({contextWindow:32768},30000),1744);
   assert.throws(()=>a.outputReserve({...body,max_completion_tokens:15000},c,{}),/思考预算/);
   assert.equal(a.outputReserve({model:c.model},c,{maxOutput:2048}),2048);
+});
+
+test('context advisories are opt in and do not turn the soft target into a stop', () => {
+  const c=cfg();c.runtime.contextAdvisory=true;
+  const body={model:c.model,messages:[{role:'user',content:'x'.repeat(3700000)}]};
+  const snap=a.snapshot(body,c,profile,a.capabilities(profile,c),0);
+  assert.ok(snap.inputTokens>=900000,`expected a near-million-token request, got ${snap.inputTokens}`);
+  assert.match(snap.advisory,/建议值/);
+  assert.equal(a.workingBudget(c,{},snap.outputReserve),1000000);
+  assert.equal(a.hardWorkingBudget({},snap.outputReserve),Infinity);
 });
 
 test('capabilities are endpoint scoped; explicit quota groups combine credentials without combining windows', () => {
@@ -138,13 +187,13 @@ test('milestones merge without dropping pending scope and require existing succe
 });
 
 function harness(chat,extra={}) {
-  const log={states:[],done:0,requests:[]};let finish,serial=0;
+  const log={states:[],done:0,requests:[],notices:[]};let finish,serial=0;
   const finished=new Promise(r=>finish=r);
   const transport={chat:async(init,h)=>{log.requests.push(init);await chat(init,h);},callTool:async()=>({ok:true,content:'actual result'}),abort:async()=>{extra.abort?.();}};
   const local=loader({[file('src/lib/transport.ts')]:{getTransport:()=>transport},[file('src/lib/store.ts')]:{uid:()=>`new-${++serial}`}});
   const config={...cfg(),enabledTools:['read_file'],maxToolRounds:30,runtime:{contextTokens:22000,contextMode:'manual',maxTokens:300000,maxMinutes:1}};
   const handle=local(file('src/lib/agent.ts')).runAgent({requestId:'adaptive-qa',profile,apiKey:'qa',config,history:[{id:'goal',role:'user',content:'Continue task',createdAt:1}],toolCtx:()=>({workspaceRoots:[]}),effortMappings:[],extraSystem:'',timeoutMs:1000,canRunHostTools:true,autoRetry:0,confirm:async()=>true,grantAccess:async()=>({ok:true,content:''}),...extra,
-    events:{onContentDelta(){},onReasoningDelta(){},onSources(){},onUsage(){},onRound(){},onNotice(){},onStopReason(){},onStep(){},onRunState:s=>{if(s)log.states.push(structuredClone(s));},onDone(){log.done++;finish();},onPaused(reason){log.reason=reason;finish();},onError(error){log.error=error;finish();}}});
+    events:{onContentDelta(){},onReasoningDelta(){},onSources(){},onUsage(){},onRound(){},onNotice(text){if(text)log.notices.push(text);},onStopReason(){},onStep(){},onRunState:s=>{if(s)log.states.push(structuredClone(s));},onDone(){log.done++;finish();},onPaused(reason){log.reason=reason;finish();},onError(error){log.error=error;finish();}}});
   return {handle,finished,log};
 }
 function response(h,text,calls=[]) { h.onContent(text);h.onToolCalls(calls);h.onStop({reason:calls.length?'tool_calls':'stop',droppedCalls:0});h.onUsage({prompt_tokens:100,completion_tokens:50,total_tokens:150});h.onDone(); }
@@ -212,6 +261,21 @@ test('invalid and cancelled summaries leave the previous compaction boundary int
   const cancelled=harness(async(init,e)=>{if(init.purpose==='compaction'){started();await new Promise(r=>release=r);e.onError('cancelled');}else response(e,'done');},{resume:state,abort:()=>release?.()});
   await reached;cancelled.handle.abort();await cancelled.finished;
   assert.equal(cancelled.log.done,0);assert.equal(cancelled.log.states.at(-1).compactions.length,0);assert.equal(cancelled.log.states.at(-1).status,'paused');
+});
+
+test('manual compaction runs with automatic compression disabled and failure falls through once', async () => {
+  const state=longState();state.milestones=[];
+  let requests=0;
+  const h=harness(async(init,e)=>{
+    requests++;
+    if(init.purpose==='compaction') { e.onError('compaction gateway unavailable',503);e.onDone(); }
+    else response(e,'Continued after failed compaction');
+  },{resume:state,compactBeforeRun:true,config:{...cfg(),runtime:{contextTokens:1000000,contextMode:'auto',semanticCompression:false,maxTokens:0,maxMinutes:1}}});
+  await h.finished;
+  assert.equal(h.log.done,1);
+  assert.equal(requests,2);
+  assert.equal(h.log.states.at(-1).compactions.length,0);
+  assert.ok(h.log.notices.some(n=>/摘要未通过|保留原文/.test(n)),JSON.stringify(h.log.notices));
 });
 
 test('resuming with another model recalculates its window and retains milestones and completed tool cursor', async () => {

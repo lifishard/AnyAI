@@ -24,7 +24,7 @@ import { PROBE_SPACING_MS, probe400, probeHistory, type ProbeStep } from './lib/
 import { formatExchange, failedExchange, exchangeOf, importExchanges } from './lib/wiretap';
 import { loadRuns, saveRun, recoverConversations, forgetRuns, runRecord } from './lib/runs';
 import { localProgress } from './lib/task-context';
-import { conversationMemory } from './lib/handoff';
+import { conversationMemory, createContextHandoff, withHandoffArchive } from './lib/handoff';
 import { capabilities, outputReserve, quotaKey, routeKey, workingBudget } from './lib/adaptive';
 import { addRunInput } from './lib/delivery';
 import { limitKey, mergeLearnedLimit, pacingFloor, estimateRequestTokens } from './lib/limits';
@@ -371,6 +371,36 @@ export default function App() {
   function updateConv(id: string, fn: (c: Conversation) => Conversation) {
     setConversations((prev) => prev.map((c) => (c.id === id ? fn(c) : c)));
   }
+
+  function openContextHandoff(msg: ChatMessage) {
+    if (!active) return;
+    const state = msg.runState ?? runRecord(msg.taskId ?? '')?.state;
+    if (!state) { toast.show('没有可交接的执行记录'); return; }
+    const next = createContextHandoff(active, state, uid('handoff'));
+    setConversations(all => [next, ...all]);
+    setActiveId(next.id);
+    setAttachments([]); setQuotes([]);
+    toast.show('已打开交接草稿。请审阅后决定是否发送；原任务进度保留。');
+  }
+
+  React.useEffect(() => {
+    if (!bootReady) return;
+    for (const source of conversations) {
+      const state = source.messages.map(m => m.runState).find(s => s?.contextHandoff && !source.handledHandoffKeys?.includes(s.contextHandoff.id));
+      if (!state?.contextHandoff) continue;
+      const key = state.contextHandoff.id;
+      const next = createContextHandoff(source, state, key);
+      setConversations(all => {
+        const current = all.find(c => c.id === source.id);
+        if (!current || current.handledHandoffKeys?.includes(key)) return all;
+        return [next, ...all.map(c => c.id === source.id ? { ...c, handledHandoffKeys: [...(c.handledHandoffKeys ?? []), key] } : c)];
+      });
+      // Do not replace text or discard attachments the user is composing.
+      if (!active?.draft?.trim() && !attachments.length && !quotes.length) setActiveId(next.id);
+      toast.show('已按设置创建交接草稿，可从侧栏打开。尚未发送，原任务仍可继续。');
+      break;
+    }
+  }, [conversations, bootReady]);
 
   function patchMessage(convId: string, msgId: string, patch: Partial<ChatMessage>) {
     updateConv(convId, (c) => ({
@@ -822,7 +852,7 @@ export default function App() {
   );
 
   const send = React.useCallback(
-    async (text: string, replaceFromIndex?: number, resumeFrom?: RunState, queuedInput?: QueuedInput, resolution?: 'skip' | 'retry') => {
+    async (text: string, replaceFromIndex?: number, resumeFrom?: RunState, queuedInput?: QueuedInput, resolution?: 'skip' | 'retry', compactBeforeRun = false) => {
       if (!settings) return;
       const nativeClient=(active?.config ?? settings.defaultConfig).client;
       const profile:KeyProfile|null=nativeClient ? {id:`client:${nativeClient.kind}`,name:nativeClient.kind,baseUrl:'',hasSecret:false,extraHeaders:{},createdAt:0} : settings.keyProfiles.find(p=>p.id===active?.keyProfileId) ?? settings.keyProfiles.find(p=>p.id===settings.activeKeyProfileId) ?? settings.keyProfiles[0] ?? null;
@@ -903,6 +933,7 @@ export default function App() {
       const history = [...kept, userMsg];
       const nextConv: Conversation = {
         ...conv,
+        draft: resumeFrom ? conv.draft : '',
         title: kept.length === 0 ? titleFrom(text) : conv.title,
         messages: resumeAnswer ? conv.messages.map((m) => m.id === answerMsg.id ? answerMsg : m) : [...history, answerMsg],
         updatedAt: Date.now(),
@@ -946,8 +977,9 @@ export default function App() {
         toolCtx: () => toolContextOf(settings, conv.projectId ?? null, grantsRef.current),
         effortMappings: settings.effortMappings,
         resume: resumeFrom,
+        compactBeforeRun,
         previousModel: resumeAnswer?.model,
-        conversationMemory: resumeFrom ? undefined : conversationMemory(history, runRecord),
+        conversationMemory: resumeFrom ? undefined : withHandoffArchive(conversationMemory(history, runRecord), history.some(m => m.quoteOnly) ? undefined : runRecord(conv.handoffSourceRunId ?? '')),
         resolveUncertain: resolution,
         // 这条路由的窗口有多大 —— 之前撞出来的那个数
         modelInfo: [...(settings.cachedModels[profile.id] ?? []), ...(settings.customModels[profile.id] ?? [])].find(m => m.id === cfg.model),
@@ -1109,7 +1141,7 @@ export default function App() {
   }
 
   const resumeRun = React.useCallback(
-    (msg: ChatMessage, resolution?: 'skip' | 'retry', additionalInput?: string) => {
+    (msg: ChatMessage, resolution?: 'skip' | 'retry', additionalInput?: string, compactBeforeRun = false) => {
       if (busy || !msg.runState || !active) return;
       const index = active.messages.findIndex((m) => m.id === msg.id);
       const question = active.messages[index-1]?.content ?? '继续';
@@ -1119,7 +1151,7 @@ export default function App() {
         state=addRunInput(state,message);
         state.reason = '用户已补充信息，正在继续';
       }
-      void send(question, undefined, state, undefined, resolution);
+      void send(question, undefined, state, undefined, resolution, compactBeforeRun);
     }, [busy, active, send],
   );
 
@@ -1343,11 +1375,15 @@ export default function App() {
 
   const composer = (
     <Composer
+      key={active?.id ?? 'new'}
+      initialDraft={active?.draft}
+      onDraftChange={text => { if (active) updateConv(active.id, c => c.draft === text ? c : { ...c, draft: text }); }}
       client={config.client}
       onClient={client=>setConfig({client,model:client?client.model:models[0]?.id || ''})}
       connectionSettings={settings}
       onConnectionSettings={patch=>setSettings(s=>s?{...s,...patch}:s)}
       contextPreview={profile && !config.client ? { profile,config,history:(active?.messages ?? []).filter(m => !m.pending),
+        handoffSourceRunId:active?.handoffSourceRunId,
         extraSystem:[projectSystemBlock(activeProject),skillSystemBlock(activeSkills)].filter(Boolean).join('\n\n'),
         toolNames,mappings:settings.effortMappings,learned:settings.modelLimits?.[limitKey(profile.id,config.model,profile.baseUrl)],
         modelInfo:models.find(m => m.id === config.model), current:busy ? [...(active?.messages ?? [])].reverse().find(m => m.pending)?.contextSnapshot : undefined } : undefined}
@@ -1524,21 +1560,26 @@ export default function App() {
 
         {turns.length === 0 ? (
           <div className="hero">
-            <h1 className="hero-title">问点什么</h1>
+            <h1 className="hero-title">{active?.handoffKey ? '审阅交接内容' : '问点什么'}</h1>
             <p className="hero-sub">
-              会自己联网查证、读你本地的文件、翻 Chrome 里的页面，答案里带可点的来源编号。
+              {active?.handoffKey ? '新对话已准备好，由你决定下一步。' : '会自己联网查证、读你本地的文件、翻 Chrome 里的页面，答案里带可点的来源编号。'}
             </p>
             <div className="hero-box">
+              {active?.handoffKey ? <section className="recovery-card" aria-label="交接草稿">
+                <strong>交接草稿 · 尚未发送</strong>
+                <p>上下文已填入下方输入框，可以编辑、保留或发送。原任务没有被交接动作停止；请先查看其最新进度，避免同时重复执行。</p>
+                <button className="btn sm" onClick={() => { if (active.forkedFrom) setActiveId(active.forkedFrom); }}>查看原任务</button>
+              </section> : null}
               {grantBanner}
               {composer}
             </div>
-            <div className="hero-examples">
+            {!active?.handoffKey ? <div className="hero-examples">
               {EXAMPLES.map((e) => (
                 <button key={e} className="example-chip" onClick={() => void send(e)}>
                   {e}
                 </button>
               ))}
-            </div>
+            </div> : null}
           </div>
         ) : (
           <>
@@ -1566,6 +1607,9 @@ export default function App() {
                     }
                     onProbe={busy ? undefined : () => void runRequestProbe(t.a ?? undefined)}
                     onResume={busy || !t.a?.runState ? undefined : () => resumeRun(t.a!)}
+                    onCompact={busy || config.client || !t.a?.runState ? undefined : () => resumeRun(t.a!, undefined, undefined, true)}
+                    onHandoff={!t.a ? undefined : () => openContextHandoff(t.a!)}
+                    onPauseForContext={t.a?.pending ? stop : undefined}
                     onResumeWithInput={busy || !t.a?.runState ? undefined : (text) => resumeRun(t.a!,undefined,text)}
                     onResolveUncertain={busy || !t.a?.runState ? undefined : (choice) => resumeRun(t.a!, choice)}
                     onQuestionSubmit={busy || !t.a?.runState?.userQuestion ? undefined : (answers) => submitQuestion(t.a!, answers)}

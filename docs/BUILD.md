@@ -55,9 +55,9 @@ Windows 上双击 **`打包桌面版.bat`** 是同一件事的无命令行版本
 
 三个入口都会切到仓库目录、保留退出码并停留显示结果。第三个入口本身也会同步，因此第二步已经做过时不会重复提交。版本从 `package.json` 读取，并核对锁文件；已经发布的标签不能被新代码覆盖。
 
-本次正式版本为 **2.0.1**。发布依赖本机可用的 GitHub 推送身份、网络和仓库 Actions；点击第三个入口表示开始云端构建，不表示三平台已经构建完成。失败时保留本地文件，修复后可重试。
+本次正式版本为 **2.1.1**。发布依赖本机可用的 GitHub 推送身份、网络和仓库 Actions；点击第三个入口表示开始云端构建，不表示三平台已经构建完成。失败时保留本地文件，修复后可重试。
 
-批处理使用 ASCII 薄壳，中文提示由 Node 输出。需要只验证本地打包且不安装、不清理旧包或打开窗口，可运行 `node scripts/build-desktop.mjs --no-install --no-cleanup --no-open`。只检查发布前条件可运行 `node scripts/sync-github.mjs --release --check-only`。
+批处理使用 ASCII 薄壳，中文提示由 Node 输出。仓库已有 `node_modules` 时，需要只验证本地打包且不安装、不清理旧包或打开窗口，可运行 `node scripts/build-desktop.mjs --no-install --no-cleanup --no-open`；如果依赖目录不存在，脚本会先安装依赖。只检查发布前条件可运行 `node scripts/sync-github.mjs --release --check-only`。
 
 ## 两个 Windows 上常见的打包失败
 

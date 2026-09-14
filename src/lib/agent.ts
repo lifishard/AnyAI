@@ -38,7 +38,7 @@ import { isRateLimited, paceOf, waitCancellable, abortError } from './pacer';
 import { contextView, runtimePolicy } from './task-context';
 import { filePathsInText } from './artifacts';
 import { endExchange } from './wiretap';
-import { calibratedTokens, capabilities, observeInput, outputReserve, prepareBody, quotaKey, routeKey, snapshot, workingBudget, RUNTIME_VERSION } from './adaptive';
+import { calibratedTokens, capabilities, dispatchBudget, nearContextSuggestion, observeInput, outputReserve, prepareBody, quotaKey, routeKey, snapshot, workingBudget, RUNTIME_VERSION } from './adaptive';
 import { compressionCandidate, memoryInstructions, memoryView, readContext, updatePlan, validateCompaction } from './context-memory';
 import { handoffInfo, repeatedWithoutProgress, type ConversationMemory } from './handoff';
 import { deliveryReport, recoveryInfo, updateRequirements, verifyRequirements } from './delivery';
@@ -113,6 +113,8 @@ export interface RunAgentArgs {
   resume?: RunState;
   conversationMemory?: ConversationMemory;
   previousModel?: string;
+  /** 手动“压缩后继续”时，忽略自动压缩开关尝试一次语义整理。 */
+  compactBeforeRun?: boolean;
   resolveUncertain?: 'skip' | 'retry';
   /** 危险工具执行前的确认。返回 false 表示拒绝 */
   confirm(step: ToolStep): Promise<boolean>;
@@ -341,6 +343,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
   let overflowRetries = 0;
   let contextTarget = Infinity;
   let compressionFailedAt = -1;
+  let manualCompactionAttempted = false;
   let milestoneStops = 0;
   let acceptanceStops = 0;
   let repeatedStops = 0;
@@ -442,8 +445,8 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
         state.reason = '额度恢复时间超过本阶段自动等待上限，进度已保留';
         control.abort(); void transport.abort(requestId); return false;
       };
-      const compact = async (target: number): Promise<boolean> => {
-        if (!toolNames.includes('read_context') || cfg.runtime?.semanticCompression === false || compressionFailedAt === state.working.length) return false;
+      const compact = async (target: number, forced = false): Promise<boolean> => {
+        if (!toolNames.includes('read_context') || (!forced && cfg.runtime?.semanticCompression === false) || compressionFailedAt === state.working.length) return false;
         const cap = capabilities(args.profile, cfg, args.limitOf?.(), args.modelInfo);
         const candidate = compressionCandidate(state, Math.max(1024, target-10000));
         if (!candidate) return false;
@@ -457,7 +460,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
         ];
         const body = prepareBody(buildRequestBody({ ...cfg, toolsEnabled: false }, messages, [], args.effortMappings), cfg, cap);
         const input = calibratedTokens(body,args.profile,cfg), reserve = outputReserve(body,cfg,cap);
-        if (input > workingBudget(cfg,cap,reserve) || budgetExceeded(input+reserve)) return false;
+        if (input > dispatchBudget(cap,reserve) || budgetExceeded(input+reserve)) return false;
         const requestId = `${args.requestId}-compact-${++requestSerial}`;
         let text = '', summaryReasoning = '', error = '', reason: string | null = null, usage: Usage | undefined, failedStatus: number | undefined, dispatched = false;
         const stat: RunRequestStat = { route:routeKey(args.profile,cfg.model),effort:cfg.effortLevel,purpose:'compaction',estimatedInput:input,reservedOutput:reserve,at:Date.now(),outcome:'pending' };
@@ -466,26 +469,32 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
         let compressionWaitStarted = 0;
         state.contextSnapshot = { ...snapshot(body,cfg,args.profile,cap,state.compactions?.length), phase: 'compacting' };
         await save(); events.onNotice('正在整理较早上下文，原始记录保留，可随时暂停');
-        await transport.chat({ requestId, runId: state.runId, purpose: 'compaction', round: state.round,
-          url: endpoint(args.profile.baseUrl,'chat/completions'), headers: buildHeaders(args.apiKey,args.profile), body, stream: cfg.stream, timeoutMs: args.timeoutMs,
-          paceKey: quotaKey(args.profile), paceTokens: input+reserve, paceInput: input, paceOutput: reserve,
-          paceTpm: cap.tpm, paceItpm: cap.itpm, paceOtpm: cap.otpm, cachedInputCounts: cap.cachedInputCounts,
-          paceMinMs: cap.rpm ? Math.ceil(60000/cap.rpm) : undefined,
-        }, { onContent(d) { text += d; dispatched = true; }, onReasoning(d) { summaryReasoning += d; dispatched = true; }, onToolCalls() {}, onStop(s) { reason = s.reason; }, onUsage(u) { usage = u; },
-          onDispatch() { dispatched = true; stat.dispatchedAt = Date.now();state.status='running';state.waitKind=undefined;void save().catch(()=>control.abort()); },
-          onPaceWait(ms) {
-            const first=!compressionWaitStarted;compressionWaitStarted ||= Date.now();
-            if (!checkWait(requestId,ms,compressionWaitStarted)) return;
-            state.status='waiting';state.waitKind='quota';if(first)void save().catch(()=>control.abort());
-            events.onNotice(`整理上下文等待额度，${Math.ceil(ms/1000)} 秒后继续`);
-          },
-          onResponse(status,headers) {
-            dispatched = true;
-            stat.httpStatus=status;
-            const limits = quotaLimits(headers);
-            if (Object.keys(limits).length) args.onLearnLimit?.({ ...limits,at:Date.now(),from:`摘要 HTTP ${status} 响应头` });
-          },
-          onDone() {}, onError(e,status) { error = e; failedStatus = status; } });
+        try {
+          await transport.chat({ requestId, runId: state.runId, purpose: 'compaction', round: state.round,
+            url: endpoint(args.profile.baseUrl,'chat/completions'), headers: buildHeaders(args.apiKey,args.profile), body, stream: cfg.stream, timeoutMs: args.timeoutMs,
+            paceKey: quotaKey(args.profile), paceTokens: input+reserve, paceInput: input, paceOutput: reserve,
+            paceTpm: cap.tpm, paceItpm: cap.itpm, paceOtpm: cap.otpm, cachedInputCounts: cap.cachedInputCounts,
+            paceMinMs: cap.rpm ? Math.ceil(60000/cap.rpm) : undefined,
+          }, { onContent(d) { text += d; dispatched = true; }, onReasoning(d) { summaryReasoning += d; dispatched = true; }, onToolCalls() {}, onStop(s) { reason = s.reason; }, onUsage(u) { usage = u; },
+            onDispatch() { dispatched = true; stat.dispatchedAt = Date.now();state.status='running';state.waitKind=undefined;void save().catch(()=>control.abort()); },
+            onPaceWait(ms) {
+              const first=!compressionWaitStarted;compressionWaitStarted ||= Date.now();
+              if (!checkWait(requestId,ms,compressionWaitStarted)) return;
+              state.status='waiting';state.waitKind='quota';if(first)void save().catch(()=>control.abort());
+              events.onNotice(`整理上下文等待额度，${Math.ceil(ms/1000)} 秒后继续`);
+            },
+            onResponse(status,headers) {
+              dispatched = true;
+              stat.httpStatus=status;
+              const limits = quotaLimits(headers);
+              if (Object.keys(limits).length) args.onLearnLimit?.({ ...limits,at:Date.now(),from:`摘要 HTTP ${status} 响应头` });
+            },
+            onDone() {}, onError(e,status) { error = e; failedStatus = status; } });
+        } catch (e) {
+          activeRequest = null;
+          if (control.signal.aborted) throw e;
+          error = e instanceof Error ? e.message : String(e);
+        }
         activeRequest = null;
         account(stat,usage,text+summaryReasoning,!!error || control.signal.aborted,dispatched,failedStatus);
         stat.detail = error || undefined;
@@ -507,6 +516,16 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           await save(); return false;
         }
       };
+      if (args.compactBeforeRun && !manualCompactionAttempted) {
+        manualCompactionAttempted = true;
+        const cap = capabilities(args.profile, cfg, args.limitOf?.(), args.modelInfo);
+        const skeleton = prepareBody(buildRequestBody({ ...cfg, toolsEnabled: false }, [], [], args.effortMappings), cfg, cap);
+        const reserve = outputReserve(skeleton, cfg, cap);
+        const hard = dispatchBudget(cap, reserve);
+        const target = Number.isFinite(hard) ? hard : workingBudget(cfg, cap, reserve);
+        const compacted = await compact(Math.max(1024, target), true);
+        if (!compacted && compressionFailedAt < 0) events.onNotice('没有可用的语义压缩结果，保留原文并继续执行');
+      }
       if (resume?.nextRetryAt && resume.nextRetryAt > Date.now()) await wait(resume.nextRetryAt-Date.now(), '继续等待调用额度恢复');
       for (;;) {
         if (control.signal.aborted) throw abortError();
@@ -706,9 +725,9 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           const cap = capabilities(args.profile,cfg,learned,args.modelInfo);
           const skeleton = prepareBody(buildRequestBody(cfg,[],final ? [] : toolNames,args.effortMappings),cfg,cap);
           const outputAllowance = outputReserve(skeleton,cfg,cap);
-          const target = Math.min(contextTarget,workingBudget(cfg,cap,outputAllowance));
+          const target = Math.min(contextTarget,dispatchBudget(cap,outputAllowance));
           if (target < 1024 || (cap.otpm && outputAllowance > cap.otpm)) {
-            await finishPause('所选输出／思考预算无法放入当前窗口或整分钟额度，请核对路由配置；等待不会解决'); return;
+            await finishPause('所选输出／思考预算无法放入已知上游实际窗口或分钟额度；请压缩后继续、切换更大窗口模型或核对路由配置，等待不会解决'); return;
           }
           const evidence=[...(state.contextArchiveSteps??[]),...state.steps!];
           const readable=toolNames.includes('read_context');
@@ -718,19 +737,24 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           const build = (v: ChatMessage[]) => prepareBody(buildRequestBody(cfg,toWire(v,cfg,!final && toolNames.length > 0,extra),final ? [] : toolNames,args.effortMappings),cfg,cap);
           let body = build(view);
           let bodyTokens = calibratedTokens(body,args.profile,cfg);
+          let crossedAdvisory = nearContextSuggestion(bodyTokens,cfg);
           if (bodyTokens > target) {
             view = contextView(readable?memoryView(state):state.working, evidence, Math.max(512, target-6000),readable);
             if (final) view = [...view, { id: 'wrap-up', role: 'user', content: '本阶段轮次已到。请如实汇总已完成与尚未完成的事项，不要声称未实际交付的文件已经生成。', createdAt: Date.now() }];
             body = build(view);
             bodyTokens = calibratedTokens(body,args.profile,cfg);
+            crossedAdvisory ||= nearContextSuggestion(bodyTokens,cfg);
           }
           const forecast = Math.max(1024,...state.working.filter(m => m.role === 'tool').slice(-3).map(m => estimateChatTokens([m])));
-          if (bodyTokens+forecast > target && attempts <= 3 && await compact(target)) continue;
+          if (cfg.runtime?.autoHandoff === true && crossedAdvisory && !state.contextHandoff) {
+            state.contextHandoff = { id: uid('context-handoff'), at: Date.now(), inputTokens: bodyTokens };
+          }
+          const compactionTarget = Math.min(target,workingBudget(cfg,cap,outputAllowance));
+          if (bodyTokens+forecast > compactionTarget && attempts <= 3 && await compact(compactionTarget)) continue;
           state.contextSnapshot = snapshot(body,cfg,args.profile,cap,state.compactions?.length);
-          state.contextSnapshot.workingBudget = target;
           state.contextSnapshot.lastReduction = Math.max(0,estimateChatTokens(state.working)-bodyTokens);
           if (bodyTokens > target) {
-            await finishPause(`必要上下文约 ${bodyTokens} token，超过当前工作预算 ${Math.floor(target)}；原始证据已保留，请调整上下文预算或缩小任务`); return;
+            await finishPause(`必要上下文约 ${bodyTokens} token，超过已知上游实际窗口或分钟额度允许的发送空间；原始证据已保留，请压缩后继续、切换更大窗口模型或核对路由配置`); return;
           }
           const reserved = bodyTokens + outputAllowance;
           if (budgetExceeded(reserved)) { await finishPause('剩余阶段预算不足以发送下一轮；接着跑会开启下一阶段预算'); return; }

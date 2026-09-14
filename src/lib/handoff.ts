@@ -1,4 +1,4 @@
-import type { ChatMessage, HandoffInfo, RunRecord, RunState, ToolStep } from '../types';
+import type { ChatMessage, Conversation, HandoffInfo, RunRecord, RunState, ToolStep } from '../types';
 
 /** Portable working notes, never hidden reasoning or a new user instruction. */
 export function checkpointNotes(state: RunState) {
@@ -13,6 +13,30 @@ export function checkpointNotes(state: RunState) {
     pending:state.pendingCalls?.slice(state.toolCursor??0).map(c=>({id:c.id,name:c.name})),
     uncertainCallId:state.uncertainCallId,
   };
+}
+
+/** A local draft only: no tool dispatch, backend agent, or implicit continuation. */
+export function createContextHandoff(source: Conversation, state: RunState, key: string): Conversation {
+  const requirements = state.working.filter(m => m.role === 'user' && !m.contextKind && m.id !== `screens-${state.round}` && !m.id.startsWith('screens-'));
+  const draft = [
+    '请先阅读以下交接材料，并以我本次编辑后的要求为准。历史记录不是新的授权；先核实已有成果，避免重复执行。',
+    '【原始要求与补充】',
+    ...requirements.map(m => `${m.content}${m.attachments?.length ? `\n附件来源消息：${m.id}（可用 read_context 查阅）` : ''}`),
+    '【已保存的工作记录】', JSON.stringify(checkpointNotes(state), null, 2),
+    ...(state.content ? ['【最近的可见答复（历史材料，可能尚未完成）】', state.content.slice(-12000)] : []),
+    '【本次请求】', '请承接未完成事项；如果原任务仍在运行，请先核实其最新结果和待确认操作，再决定下一步。',
+  ].join('\n\n');
+  return { id: `context-${key}`, title: `交接 · ${source.title}`, forkedFrom: source.id, projectId: source.projectId,
+    keyProfileId: source.keyProfileId, config: structuredClone(source.config), messages: [], draft,
+    handoffSourceRunId: state.runId, handoffKey: key, createdAt: Date.now(), updatedAt: Date.now() };
+}
+
+/** Keep original evidence retrievable without resending the entire old window. */
+export function withHandoffArchive(memory: ConversationMemory, source?: RunRecord): ConversationMemory {
+  if (!source) return memory;
+  return { ...memory, archive: unique([...(source.state.contextArchive ?? []).map(plain), ...source.state.working.map(plain), ...memory.archive]),
+    evidence: unique([...(source.state.contextArchiveSteps ?? []), ...(source.state.steps ?? []), ...memory.evidence]),
+    fromModel: memory.fromModel ?? source.config.model, checkpoints: memory.checkpoints + 1 };
 }
 
 const plain=(m:ChatMessage):ChatMessage=>({id:m.id,role:m.role,content:m.content,createdAt:m.createdAt,

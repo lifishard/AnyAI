@@ -1,11 +1,36 @@
 import type { ChatMessage, GenerationConfig, ToolStep } from '../types';
 import { estimateChatTokens } from './limits';
 
+/**
+ * The context value is a client-side organization/advisory target.  It is
+ * deliberately independent from a provider's actual context window.
+ */
+export const DEFAULT_CONTEXT_TOKENS = 1_000_000;
+export const LEGACY_CONTEXT_TOKENS = 24_000;
+export const LEGACY_STAGE_TOKENS = 300_000;
+/** Persisted runtime configs use this marker to make legacy migration one-shot. */
+export const RUNTIME_MIGRATION_VERSION = 2;
+
 export const DEFAULT_RUNTIME = {
-  contextTokens: 24000, tpm: 0, rpm: 0, maxTokens: 300000, maxMinutes: 60, recoveryMinutes: 15,
+  contextTokens: DEFAULT_CONTEXT_TOKENS, tpm: 0, rpm: 0, maxTokens: 0, maxMinutes: 60, recoveryMinutes: 15,
 };
+
+/**
+ * Apply one-time migrations that are safe to identify from the old defaults.
+ * A user value other than the old default remains a soft target/budget.
+ */
+export function migrateRuntime(runtime: Partial<NonNullable<GenerationConfig['runtime']>> | undefined) {
+  const input = runtime ?? {};
+  const out = { ...DEFAULT_RUNTIME, ...input };
+  const migrateLegacy = input.runtimeMigrationVersion !== RUNTIME_MIGRATION_VERSION;
+  if (migrateLegacy && input.contextTokens === LEGACY_CONTEXT_TOKENS) out.contextTokens = DEFAULT_CONTEXT_TOKENS;
+  if (migrateLegacy && input.maxTokens === LEGACY_STAGE_TOKENS) out.maxTokens = 0;
+  out.runtimeMigrationVersion = RUNTIME_MIGRATION_VERSION;
+  return out;
+}
+
 export function runtimePolicy(cfg: GenerationConfig) {
-  const policy = { ...DEFAULT_RUNTIME, ...cfg.runtime };
+  const policy = migrateRuntime(cfg.runtime);
   for (const k of Object.keys(DEFAULT_RUNTIME) as (keyof typeof DEFAULT_RUNTIME)[]) {
     if (!Number.isFinite(policy[k]) || policy[k] < 0) policy[k] = DEFAULT_RUNTIME[k];
   }

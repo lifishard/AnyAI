@@ -1,6 +1,7 @@
 import type { GenerationConfig, ParamState } from '../types';
 import { DEFAULT_ENABLED_TOOLS, toolsPayload } from './tools/registry';
 import { effortFields, type EffortMapping } from './effort';
+import { DEFAULT_RUNTIME, migrateRuntime, RUNTIME_MIGRATION_VERSION } from './task-context';
 
 export type ParamKind = 'number' | 'int' | 'boolean' | 'string' | 'select';
 
@@ -178,7 +179,7 @@ export function defaultParams(): Record<string, ParamState> {
   const out: Record<string, ParamState> = {};
   for (const d of PARAM_DEFS) {
     out[d.key] = {
-      enabled: d.key === 'temperature',
+      enabled: false,
       value: d.default,
     };
   }
@@ -201,7 +202,8 @@ export function defaultGenerationConfig(): GenerationConfig {
     enabledTools: [...DEFAULT_ENABLED_TOOLS],
     maxToolRounds: 30,
     approvalMode: 'ask',
-    runtime: { contextMode: 'auto', semanticCompression: true, milestones: true, contextTokens: 24000, tpm: 0, rpm: 0, maxTokens: 300000, maxMinutes: 60, recoveryMinutes: 15 },
+    runtime: { ...DEFAULT_RUNTIME, contextMode: 'auto', semanticCompression: true, milestones: true,
+      runtimeMigrationVersion: RUNTIME_MIGRATION_VERSION } as GenerationConfig['runtime'],
   };
 }
 
@@ -219,8 +221,18 @@ export function mergeParamDefaults(cfg: GenerationConfig): GenerationConfig {
     out.enabledTools = [...new Set([...out.enabledTools, 'read_tool_result', 'register_outputs'])];
     if (out.enabledTools.some((n) => n.startsWith('chrome_'))) out.enabledTools.push('chrome_fetch_json');
   }
-  out.runtime = { ...base.runtime!, ...cfg.runtime };
-  if (!cfg.runtime?.contextMode) out.runtime.contextMode = cfg.runtime?.contextTokens && cfg.runtime.contextTokens !== 24000 ? 'manual' : 'auto';
+  out.runtime = { ...migrateRuntime(cfg.runtime), contextMode: cfg.runtime?.contextMode ?? base.runtime!.contextMode };
+  // The old UI inferred manual mode from a non-default context value.  The
+  // value is now always a soft organization target, so retain the field only
+  // for compatibility and never let it change dispatch behavior.
+  if (!cfg.runtime?.contextMode) out.runtime.contextMode = base.runtime!.contextMode;
+  // The old default was sent on every request and accidentally disabled long
+  // runs.  Exact legacy defaults are migrated; other user budgets survive.
+  const legacyTemperature = cfg.params?.temperature;
+  const migrateLegacy = cfg.runtime?.runtimeMigrationVersion !== RUNTIME_MIGRATION_VERSION;
+  if (migrateLegacy && legacyTemperature?.enabled === true && Number(legacyTemperature.value) === 0.8) {
+    out.params.temperature = { ...legacyTemperature, enabled: false };
+  }
   if (typeof out.maxToolRounds !== 'number') out.maxToolRounds = base.maxToolRounds;
   if (typeof out.toolsEnabled !== 'boolean') out.toolsEnabled = base.toolsEnabled;
   if (out.approvalMode !== 'ask' && out.approvalMode !== 'auto' && out.approvalMode !== 'all') {

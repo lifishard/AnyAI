@@ -1,7 +1,9 @@
 import type { ContextSnapshot, GenerationConfig, KeyProfile, ModelInfo, RouteOverrides } from '../types';
 import { estimateRequestTokens, type LearnedLimit } from './limits';
+import { runtimePolicy } from './task-context';
 
 export const RUNTIME_VERSION = 'handoff-1';
+export const CONTEXT_ADVISORY_RATIO = 0.9;
 const CALIBRATION_KEY = 'anyai:context-calibration:v1';
 type Calibration = { ratio: number; count: number; at: number };
 const calibration = new Map<string,Calibration>();
@@ -51,7 +53,7 @@ export function capabilities(profile: KeyProfile, cfg: GenerationConfig, learned
   return { ...override, contextWindow: window, maxOutput: min(override.maxOutput, metadata?.maxOutput, fresh('maxOutput')),
     rpm: min(override.rpm, cfg.runtime?.rpm, fresh('rpm')), tpm: min(override.tpm, cfg.runtime?.tpm, fresh('tpm')),
     itpm: min(override.itpm, fresh('itpm')), otpm: min(override.otpm, fresh('otpm')),
-    source: window ? sources.filter(([,n]) => positive(n)).map(([label,n]) => `${label} ${n!.toLocaleString()}`).join('；')+'（取较小值）' : '窗口未知；使用保守工作预算' };
+    source: window ? sources.filter(([,n]) => positive(n)).map(([label,n]) => `${label} ${n!.toLocaleString()}`).join('；')+'（取较小值）' : '窗口未知；不设本地硬上限，按配置建议值整理并由上游决定实际容量' };
 }
 export function prepareBody(body: Record<string, unknown>, cfg: GenerationConfig, cap: RouteOverrides): Record<string, unknown> {
   const out = { ...body };
@@ -93,12 +95,50 @@ export function outputReserve(body: Record<string, unknown>, cfg: GenerationConf
   if (cap.maxOutput && wanted > cap.maxOutput) throw new Error('所选思考预算无法放入已知输出上限');
   return wanted;
 }
+
+/** The configured client-side target used for organization and advisories. */
+export function contextSuggestion(cfg: GenerationConfig): number {
+  return runtimePolicy(cfg).contextTokens;
+}
+
+/**
+ * Return the soft context target.  Provider capacity is intentionally not
+ * folded into this value: a one-million-token target is not a local stop
+ * condition, and larger requests must still be attempted when the provider
+ * has no known smaller window.
+ */
 export function workingBudget(cfg: GenerationConfig, cap: RouteOverrides, reserve: number): number {
-  const manual = cfg.runtime?.contextMode === 'manual' || (!cfg.runtime?.contextMode && cfg.runtime?.contextTokens !== undefined && cfg.runtime.contextTokens !== 24000);
-  const configured = cfg.runtime?.contextTokens || 24000;
-  const available = cap.contextWindow ? cap.contextWindow-reserve-Math.max(1024, Math.ceil(cap.contextWindow*0.03)) : Infinity;
-  const preferred = manual ? configured : cap.contextWindow ? Math.min(96000, available) : 24000;
-  return Math.floor(Math.min(preferred, available, cap.tpm ? cap.tpm-reserve : Infinity, cap.itpm ?? Infinity));
+  void cap; void reserve;
+  return contextSuggestion(cfg);
+}
+
+/**
+ * Known provider/quota capacity available for one request.  This is the only
+ * local context value that may block dispatch.  Unknown limits remain
+ * unbounded and are learned from an explicit upstream response if one occurs.
+ */
+export function hardWorkingBudget(cap: RouteOverrides, reserve: number): number {
+  const window = positive(cap.contextWindow);
+  const availableWindow = window === undefined
+    ? Infinity
+    : window - reserve - Math.max(1024, Math.ceil(window * 0.03));
+  const availableTpm = positive(cap.tpm) === undefined ? Infinity : cap.tpm! - reserve;
+  const availableItpm = positive(cap.itpm) === undefined ? Infinity : cap.itpm!;
+  return Math.floor(Math.min(availableWindow, availableTpm, availableItpm));
+}
+
+/** Alias that makes the dispatch-only meaning explicit at call sites. */
+export const dispatchBudget = hardWorkingBudget;
+
+export function nearContextSuggestion(inputTokens: number, cfg: GenerationConfig): boolean {
+  const suggestion = contextSuggestion(cfg);
+  return suggestion > 0 && inputTokens >= Math.ceil(suggestion * CONTEXT_ADVISORY_RATIO);
+}
+
+function contextAdvisory(inputTokens: number, suggestion: number): string | undefined {
+  if (suggestion <= 0 || inputTokens < Math.ceil(suggestion * CONTEXT_ADVISORY_RATIO)) return undefined;
+  const ratio = Math.round(inputTokens / suggestion * 100);
+  return `上下文约 ${inputTokens.toLocaleString()} token，已达到建议值 ${suggestion.toLocaleString()} 的 ${ratio}%。任务会继续；实际可发送大小取决于上游窗口与额度。`;
 }
 export function snapshot(body: Record<string, unknown>, cfg: GenerationConfig, profile: KeyProfile, cap: ReturnType<typeof capabilities>, count = 0): ContextSnapshot {
   const messages = (body.messages ?? []) as { role: string; content: unknown }[];
@@ -109,6 +149,7 @@ export function snapshot(body: Record<string, unknown>, cfg: GenerationConfig, p
   const attachments = messages.reduce((sum, m) => sum+(Array.isArray(m.content) ? estimateRequestTokens([{ ...m, content: m.content.filter(p => p.type === 'image_url') }]) : 0), 0);
   const inputTokens = calibratedTokens(body,profile,cfg), reserve = outputReserve(body, cfg, cap);
   return { inputTokens, outputReserve: reserve, contextWindow: cap.contextWindow, workingBudget: workingBudget(cfg, cap, reserve),
+    advisory: cfg.runtime?.contextAdvisory === true ? contextAdvisory(inputTokens, contextSuggestion(cfg)) : undefined,
     source: cap.source, estimated: true, components: { system, tools, toolResults, attachments, conversation: Math.max(0,inputTokens-system-tools-toolResults-attachments) },
     compressionCount: count, quota:{rpm:cap.rpm,tpm:cap.tpm,itpm:cap.itpm,otpm:cap.otpm}, routeKey: routeKey(profile, cfg.model), phase: 'preparing', at: Date.now() };
 }

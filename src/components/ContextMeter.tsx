@@ -6,11 +6,12 @@ import type { LearnedLimit } from '../lib/limits';
 import { capabilities, prepareBody, snapshot } from '../lib/adaptive';
 import { buildRequestBody } from '../lib/paramSchema';
 import { buildWire } from '../lib/agent';
-import { conversationMemory } from '../lib/handoff';
+import { conversationMemory, withHandoffArchive } from '../lib/handoff';
 import { memoryInstructions } from '../lib/context-memory';
 import { runRecord } from '../lib/runs';
 
 export interface ContextPreview {
+  handoffSourceRunId?: string;
   profile: KeyProfile;
   config: GenerationConfig;
   history: ChatMessage[];
@@ -31,7 +32,7 @@ export default function ContextMeter({ preview, draft }: { preview: ContextPrevi
     try {
       const cap = capabilities(preview.profile,preview.config,preview.learned,preview.modelInfo);
       const tools = preview.config.toolsEnabled ? [...new Set([...preview.toolNames,'read_context', 'read_tool_result', ...(preview.config.runtime?.milestones === false ? [] : ['update_plan','update_requirements','verify_requirements'])])] : [];
-      const history=[...preview.history,deferredDraft],memory=conversationMemory(history,runRecord);
+      const history=[...preview.history,deferredDraft],memory=withHandoffArchive(conversationMemory(history,runRecord),history.some(m=>m.quoteOnly)?undefined:runRecord(preview.handoffSourceRunId??''));
       const extra=preview.extraSystem+memoryInstructions({working:memory.history,contextArchiveSteps:memory.evidence,round:1,at:0,stoppedBy:'unknown',
         requirementSourceIds:history.filter(m=>m.role==='user').map(m=>m.id)},tools.includes('update_plan'),tools.includes('read_context'));
       const body = prepareBody(buildRequestBody(preview.config,buildWire(memory.history,preview.config,extra),tools,preview.mappings),preview.config,cap);
@@ -55,7 +56,7 @@ export default function ContextMeter({ preview, draft }: { preview: ContextPrevi
         <div className="context-total">约 {n(s.inputTokens)} <small>/ {s.contextWindow ? `${n(s.contextWindow)} token` : '窗口未知'}</small></div>
         <dl>
           <div><dt>输出预留（含思考）</dt><dd>{n(s.outputReserve)}</dd></div>
-          <div><dt>本轮工作预算</dt><dd>{n(s.workingBudget)}</dd></div>
+          <div><dt>历史整理目标（非硬上限）</dt><dd>{n(s.workingBudget)}</dd></div>
           <div><dt>系统与项目指令</dt><dd>{n(s.components.system)}</dd></div>
           <div><dt>工具定义</dt><dd>{n(s.components.tools)}</dd></div>
           <div><dt>对话与文本材料</dt><dd>{n(s.components.conversation)}</dd></div>

@@ -221,6 +221,9 @@ export default function AnswerBlock(props: {
   onProbe?: () => void;
   /** 有中断现场时的「接着跑」 */
   onResume?: () => void;
+  onCompact?: () => void;
+  onHandoff?: () => void;
+  onPauseForContext?: () => void;
   onResumeWithInput?: (text:string) => void;
   onResolveUncertain?: (choice: 'skip' | 'retry') => void;
   onQuestionSubmit?: (answers: UserQuestionAnswers) => void;
@@ -365,8 +368,18 @@ export default function AnswerBlock(props: {
         断线保护的入口。放在错误卡**上面**：先告诉人「东西还在」，
         再让他看出了什么事 —— 顺序反过来的话，人已经准备重问了
       */}
+      {answer?.pending && answer.contextSnapshot?.advisory ? <section className="recovery-card" aria-label="上下文建议">
+        <strong>上下文整理建议 · 任务仍在继续</strong>
+        <p>{answer.contextSnapshot.advisory}</p>
+        <div className="recovery-actions">
+          {props.onPauseForContext ? <button className="btn sm" onClick={props.onPauseForContext}>暂停，选择压缩后继续</button> : null}
+          {props.onHandoff ? <button className="btn sm" onClick={props.onHandoff}>新窗口交接</button> : null}
+        </div>
+        <p className="hint">也可以保持当前任务运行。新窗口只预填交接草稿，由你决定何时发送。</p>
+      </section> : null}
+      {!answer?.pending && !answer?.runState && props.onHandoff ? <button className="btn sm" onClick={props.onHandoff}>新窗口交接</button> : null}
       {answer?.runState && (!answer.runState.userQuestion || answer.runState.userQuestion.answers) && !answer.pending && props.onResume ? (
-        <RecoveryCard state={answer.runState} onResume={props.onResume} onAddInput={props.onResumeWithInput} onResolve={props.onResolveUncertain}/>
+        <RecoveryCard state={answer.runState} onResume={props.onResume} onCompact={props.onCompact} onHandoff={props.onHandoff} onAddInput={props.onResumeWithInput} onResolve={props.onResolveUncertain}/>
       ) : null}
 
       {answer?.handoff ? <details className="reasoning">

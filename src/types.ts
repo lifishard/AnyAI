@@ -38,6 +38,7 @@ export interface RouteOverrides {
 }
 
 export interface ContextSnapshot {
+  advisory?: string;
   inputTokens: number;
   outputReserve: number;
   contextWindow?: number;
@@ -208,6 +209,9 @@ export interface GenerationConfig {
     recoveryMinutes: number;
     contextMode?: 'auto' | 'manual';
     semanticCompression?: boolean;
+    contextAdvisory?: boolean;
+    autoHandoff?: boolean;
+    runtimeMigrationVersion?: number;
     milestones?: boolean;
   };
 }
@@ -381,6 +385,7 @@ export interface ChatMessage {
 
 /** 中断现场。够用来无缝续跑，也够小到能塞进 localStorage */
 export interface RunState {
+  contextHandoff?: { id: string; at: number; inputTokens: number };
   contextArchive?: ChatMessage[];
   contextArchiveSteps?: ToolStep[];
   handoff?: HandoffInfo;
@@ -466,6 +471,11 @@ export interface RunRecord {
 }
 
 export interface Conversation {
+  /** Editable, unsent context handoff. Creating it never starts a request. */
+  draft?: string;
+  handoffSourceRunId?: string;
+  handoffKey?: string;
+  handledHandoffKeys?: string[];
   id: string;
   title: string;
   /** 钉在侧栏顶部 */

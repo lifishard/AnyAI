@@ -139,8 +139,16 @@ test('resume with four large historical images passes the default 24K preflight 
   history.push({id:'current',role:'user',content:'Please send the calendar file again'});
   const state={version:2,runId:'large-history',phase:'request',round:1,status:'paused',stoppedBy:'error',at:1,working:history,steps:[],sources:[],content:'',reason:'Previous false token overflow'};
   let requests=0;
-  const h=agentHarness(async(init,e)=>{requests++;assert.ok(init.paceTokens<24000);assert.equal(init.body.messages.flatMap(m=>Array.isArray(m.content)?m.content:[]).filter(p=>p.type==='image_url').length,4);respond(e);},undefined,{resume:state,history,config:{model:'mock',systemPrompt:'',historyLimit:0,stream:true,params:{},effort:'default',toolsEnabled:true,enabledTools:['read_file'],maxToolRounds:5,runtime:{contextTokens:24000,maxMinutes:1,maxTokens:300000}}});
+  const h=agentHarness(async(init,e)=>{requests++;assert.ok(init.paceTokens>0);assert.equal(init.body.messages.flatMap(m=>Array.isArray(m.content)?m.content:[]).filter(p=>p.type==='image_url').length,4);respond(e);},undefined,{resume:state,history,config:{model:'mock',systemPrompt:'',historyLimit:0,stream:true,params:{},effort:'default',toolsEnabled:true,enabledTools:['read_file'],maxToolRounds:5,runtime:{contextTokens:24000,maxMinutes:1,maxTokens:300000}}});
   await h.finished;assert.equal(requests,1);assert.equal(h.log.done,1);assert.equal(state.working[0].attachments[0].dataUrl.length,270022);
+});
+test('unknown provider windows still dispatch requests above 24K and 1M', async () => {
+  const history=[{id:'large',role:'user',content:'x'.repeat(4200000),createdAt:1}];
+  let input=0;
+  const h=agentHarness(async(init,e)=>{input=init.paceInput;respond(e,'long request accepted');},undefined,{history,config:{model:'mock',systemPrompt:'',historyLimit:0,stream:true,params:{},effort:'default',toolsEnabled:false,enabledTools:[],maxToolRounds:5,runtime:{contextTokens:1000000,tpm:0,rpm:0,maxTokens:0,maxMinutes:1,recoveryMinutes:15,semanticCompression:false}}});
+  await h.finished;
+  assert.ok(input>1000000,`request should exceed the advisory threshold: ${input}`);
+  assert.equal(h.log.done,1);
 });
 test('quote-only requests send selected paragraph and follow-up, excluding full source', () => {
   const local=loader({[file('src/lib/transport.ts')]:{},[file('src/lib/store.ts')]:{uid:()=>''}});

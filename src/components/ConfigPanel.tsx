@@ -64,21 +64,20 @@ export default function ConfigPanel(props: {
       <div className="section">
         <div className="section-title">连续工作</div>
         <div className="hint">任务会保存进度，在临时限流或断网后等待恢复。阶段预算用完会暂停，接着跑可开启下一阶段。</div>
-        <Field label="上下文管理">
-          <select value={runtime.contextMode ?? 'auto'} onChange={e => onChange({ runtime:{ ...runtime,contextMode:e.target.value as 'auto' | 'manual' } })}>
-            <option value="auto">自动适配当前路由</option><option value="manual">手动限制工作上下文</option>
-          </select>
-        </Field>
-        <Switch label="允许语义摘要（使用当前模型，计入阶段用量）" checked={runtime.semanticCompression !== false} onChange={v => onChange({ runtime:{ ...runtime,semanticCompression:v } })} />
+        <p className="hint">1M 是上下文建议值，超过仍可继续。实际可发送大小取决于所选模型与上游额度。以下设置在下次启动或续跑时生效。</p>
+        <Switch label="接近建议值时提醒（90%）" checked={runtime.contextAdvisory === true} onChange={v => onChange({ runtime:{ ...runtime,contextAdvisory:v } })} />
+        <Switch label="接近建议值时自动打开交接草稿" checked={runtime.autoHandoff === true} onChange={v => onChange({ runtime:{ ...runtime,autoHandoff:v } })} />
+        <p className="hint">交接会打开新对话并预填上下文，由你决定是否修改、发送。原任务继续运行，不会启动后台 agent。</p>
+        <Switch label="自动压缩历史（使用当前模型，计入用量）" checked={runtime.semanticCompression !== false} onChange={v => onChange({ runtime:{ ...runtime,semanticCompression:v } })} />
         <Switch label="允许模型按需维护里程碑" checked={runtime.milestones !== false} onChange={v => onChange({ runtime:{ ...runtime,milestones:v } })} />
         {([
-          ['contextTokens', '本轮上下文预算（token）', '完整工具结果另存，按需读取。此处是客户端预算，不代表模型窗口大小。'],
+          ['contextTokens', '上下文建议值（token）', '默认 1,000,000；用于整理历史和可选提醒，不是停止任务的硬上限。'],
           ['tpm', '每分钟 token 额度（TPM）', '填上游真实额度；0 表示从响应头或报错学习，未知时使用退避。'],
           ['rpm', '每分钟请求额度（RPM）', '同一份凭据的请求统一排队；0 表示从上游学习。'],
           ['maxTokens', '每阶段 token 预算', '按实际用量累计，无 usage 时保守估算。0 表示不限制。'],
           ['maxMinutes', '每阶段最长时间（分钟）', '包括执行和等待。0 表示不限制。'],
           ['recoveryMinutes', '单次中断最多自动等待（分钟）', '达到后保留现场，等待你接着跑。'],
-        ] as const).filter(([key]) => key !== 'contextTokens' || runtime.contextMode === 'manual').map(([key, label, hint]) => <Field key={key} label={label} hint={hint}>
+        ] as const).map(([key, label, hint]) => <Field key={key} label={label} hint={hint}>
           <input type="number" min={key === 'contextTokens' ? 2048 : 0} value={runtime[key]}
             onChange={(e) => onChange({ runtime: { ...runtime, [key]: Math.max(0, Number(e.target.value) || 0) } })} />
         </Field>)}

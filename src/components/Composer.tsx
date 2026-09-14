@@ -40,6 +40,8 @@ const APPROVAL_OPTIONS: { value: ApprovalMode; label: string; desc: string }[] =
 type SendMode = 'chat' | 'work';
 
 export default function Composer(props: {
+  initialDraft?: string;
+  onDraftChange?: (text: string) => void;
   client?:import('../lib/connections').ClientSelection;
   onClient?:(client:import('../lib/connections').ClientSelection|undefined)=>void;
   connectionSettings?:import('../types').AppSettings;
@@ -112,7 +114,8 @@ export default function Composer(props: {
   queued: string[];
   onDropQueued: (index: number) => void;
 }) {
-  const [text, setText] = React.useState('');
+  const [text, setText] = React.useState(props.initialDraft ?? '');
+  React.useEffect(() => { props.onDraftChange?.(text); }, [text]);
   const [localMode, setLocalMode] = React.useState<SendMode>(props.sendMode ?? 'work');
   const contextDraft = React.useMemo(() => ({ id:'draft', role:'user' as const, content:text, createdAt:0,
     attachments:props.attachments, quotes:props.quotes, quoteOnly:props.quoteOnly && props.quotes.length > 0 }),[text,props.attachments,props.quotes,props.quoteOnly]);
