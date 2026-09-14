@@ -5,6 +5,7 @@ import { GROUP_LABEL, TOOLS, availableTools, type ToolGroup } from '../lib/tools
 import { Field, Segmented, Switch } from './ui';
 import { runtimePolicy } from '../lib/task-context';
 import RouteSettings from './RouteSettings';
+import GatewayRecovery from './GatewayRecovery';
 
 const THINKING_OPTIONS: { value: ThinkingStyle; label: string }[] = [
   { value: 'auto', label: '自动（按模型映射）— 推荐' },
@@ -61,6 +62,7 @@ export default function ConfigPanel(props: {
 
   return (
     <div>
+      <GatewayRecovery profile={props.profile} onReady={r=>{if(r.baseUrl&&props.profile)props.onProfileChange?.({...props.profile,baseUrl:r.baseUrl});}}/>
       <div className="section">
         <div className="section-title">连续工作</div>
         <div className="hint">任务会保存进度，在临时限流或断网后等待恢复。阶段预算用完会暂停，接着跑可开启下一阶段。</div>
@@ -70,6 +72,8 @@ export default function ConfigPanel(props: {
         <p className="hint">交接会打开新对话并预填上下文，由你决定是否修改、发送。原任务继续运行，不会启动后台 agent。</p>
         <Switch label="自动压缩历史（使用当前模型，计入用量）" checked={runtime.semanticCompression !== false} onChange={v => onChange({ runtime:{ ...runtime,semanticCompression:v } })} />
         <Switch label="允许模型按需维护里程碑" checked={runtime.milestones !== false} onChange={v => onChange({ runtime:{ ...runtime,milestones:v } })} />
+        <Switch label="检测回复复读与读取循环" checked={runtime.loopGuard !== false} onChange={v => onChange({ runtime:{ ...runtime,loopGuard:v } })} />
+        <p className="hint">Work 回复连续复读或反复读取相同结果时暂停并保存现场，避免继续消耗。刻意生成重复内容时可关闭。</p>
         {([
           ['contextTokens', '上下文建议值（token）', '默认 1,000,000；用于整理历史和可选提醒，不是停止任务的硬上限。'],
           ['tpm', '每分钟 token 额度（TPM）', '填上游真实额度；0 表示从响应头或报错学习，未知时使用退避。'],

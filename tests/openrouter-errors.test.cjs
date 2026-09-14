@@ -22,6 +22,7 @@ test('OpenRouter ZDR rejection preserves the real reason without blaming model i
 });
 
 test('routing feature failures are distinguished from missing models and generic 404', () => {
+  assert.match(classifyError('Stream ended before producing a non-ping SSE event (code STREAM_EARLY_EOF)',undefined).title,/网关连接已建立/);
   assert.equal(classifyError('No endpoints found that support image input', 404).kind, 'multimodal');
   assert.equal(classifyError('No endpoints found that support tool use', 404).kind, 'tools_unsupported');
   assert.equal(classifyError('No endpoints found for vendor/free', 404).kind, 'route_unavailable');

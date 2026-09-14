@@ -329,12 +329,15 @@ function registerIpc() {
   });
   ipcMain.handle('snc:toolAbort',(_e,runId)=>{conversationClients?.abort(runId);localClients?.abort(runId);for(const rec of activeToolControllers.values())if(rec.runId===runId||rec.teamRunId===runId)rec.controller.abort();});
   const collaboration = require('./collaboration-store.cjs').createCollaborationStore(app.getPath('userData'));
+  const gatewayRecovery = require('./gateway-recovery.cjs').createGatewayRecovery({getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),secretGet:id=>store.secretGet(id),getClaudeConnection:()=>require('./claude-connection.cjs').readClaudeConnection()});
+  ipcMain.handle('snc:gatewayRepair',(_event,profileId)=>{dataAvailable();return gatewayRecovery.repair(profileId);});
   const teamFiles = require('./team-files.cjs').createTeamFiles(app.getPath('userData'));
   try{if(!dataBackup.recoveryError)localClients=require('./local-clients.cjs').createLocalClients({userData:app.getPath('userData'),collaboration,teamFiles,getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),openExternal:url=>shell.openExternal(url)});}catch(error){storageStartupError=String(error);}
   ipcMain.handle('snc:pickClientBinary',async()=>{const chosen=await dialog.showOpenDialog(mainWindow,{title:'选择官方原生客户端',properties:['openFile'],...(process.platform==='win32'?{filters:[{name:'原生程序',extensions:['exe']}]}:{})});return chosen.canceled?null:chosen.filePaths[0];});
   ipcMain.handle('snc:clientCheck',(_e,kind)=>{dataAvailable();if(!['codex','claude'].includes(kind))throw Error('未知客户端');return localClients.check(kind);});
   ipcMain.handle('snc:clientLogin',()=>{dataAvailable();return localClients.login();});
-  conversationClients=require('./conversation-clients.cjs').createConversationClients({userData:app.getPath('userData'),getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),store:runtimeStore(),openExternal:url=>shell.openExternal(url)});
+  conversationClients=require('./conversation-clients.cjs').createConversationClients({userData:app.getPath('userData'),getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),store:runtimeStore(),openExternal:url=>shell.openExternal(url),deps:{claudeGatewayCheck:()=>gatewayRecovery.checkClaude(),repairClaudeGateway:()=>gatewayRecovery.repairClaude()}});
+  ipcMain.handle('snc:claudeRepair',()=>{dataAvailable();return conversationClients.repairClaude();});
   ipcMain.handle('snc:conversationClientCheck',(_e,kind)=>{dataAvailable();return conversationClients.check(kind);});
   ipcMain.handle('snc:conversationClientConnect',(_e,kind)=>{dataAvailable();return conversationClients.connect(kind);});
   ipcMain.handle('snc:conversationClientRun',(event,args)=>{dataAvailable();return conversationClients.run(args,message=>event.sender.send('snc:clientEvent',message));});

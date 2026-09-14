@@ -10,7 +10,8 @@ const success = { type: 'result', subtype: 'success', is_error: false, session_i
 function fixture(options = {}) {
   const calls = [], timers = [];
   let child;
-  const run = createClaudeCode({ platform: 'win32', exists: () => true, env: { PATH: 'fixture', SystemRoot: 'C:\\Windows', ANTHROPIC_API_KEY: 'fixture-do-not-forward', ANTHROPIC_BASE_URL: 'fixture', NODE_OPTIONS: 'fixture' },
+  const run = createClaudeCode({ platform: 'win32', exists: () => true, validateBinary:()=>{}, env: { PATH: 'fixture', SystemRoot: 'C:\\Windows', ANTHROPIC_API_KEY: 'fixture-connection-key', ANTHROPIC_BASE_URL: 'https://custom.example/anthropic', NODE_OPTIONS: 'fixture' },
+    ...(options.connection ? {readClaudeConnection:()=>options.connection} : {}),
     setTimeout: fn => { timers.push(fn); return fn; }, clearTimeout: () => {},
     spawn: (command, args, config) => {
       calls.push({ command, args, config });
@@ -29,10 +30,16 @@ test('untrusted prompt travels verbatim over stdin with native shell:false and f
   assert.equal(result.ok, true); assert.equal(result.execution.sessionId, 'fixture-session');
   assert.equal(result.execution.status, 'succeeded'); assert.equal(f.calls[0].input, prompt);
   assert.equal(f.calls[0].config.shell, false); assert.equal(f.calls[0].args.includes(prompt), false);
-  assert.equal(f.calls[0].config.env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(f.calls[0].config.env.ANTHROPIC_API_KEY, 'fixture-connection-key');
   assert.equal(f.calls[0].config.env.NODE_OPTIONS, undefined);
   assert.equal(f.calls[0].args.includes('--dangerously-skip-permissions'), false);
   assert.equal(f.calls[0].args.includes('dontAsk'), true);
+});
+
+test('a compatible gateway model ID with a provider path reaches Claude Code verbatim',async()=>{
+ const f=fixture(),result=await f.run({prompt:'fixture'},{...ctx,claudeExtraArgs:'--model company/model-v1'});
+ assert.equal(result.ok,true);const args=f.calls[0].args;assert.equal(args[args.indexOf('--model')+1],'company/model-v1');
+ assert.throws(()=>safeExtraArgs('--model company/model;echo'),/附加参数/);
 });
 test('nonzero exit remains failed even with valid output; stderr never leaks', async () => {
   const f = fixture({ code: 1 }), result = await f.run({ prompt: 'fixture' }, ctx);
@@ -80,4 +87,12 @@ test('reject shell shims and launch failure is explicit', async () => {
 test('credential families are excluded from environment', () => {
   const env = localLoginEnvironment({ HOME: 'fixture-home', CLAUDE_CODE_OAUTH_TOKEN: 'fixture', ANTHROPIC_AUTH_TOKEN: 'fixture', CLAUDE_CODE_USE_BEDROCK: '1', AWS_PROFILE: 'fixture', NODE_OPTIONS: 'fixture' });
   assert.deepEqual(Object.keys(env).sort(), ['FORCE_COLOR', 'HOME', 'NO_COLOR']);
+});
+
+test('user-configured Claude routing is passed only via environment with settings and hooks still isolated',async()=>{
+ const connection={baseUrl:'http://127.0.0.1:20128',env:{ANTHROPIC_BASE_URL:'http://127.0.0.1:20128',ANTHROPIC_AUTH_TOKEN:'private-route-token',ANTHROPIC_DEFAULT_OPUS_MODEL:'auto/claude-opus'}};
+ const f=fixture({connection}),result=await f.run({prompt:'fixture'},ctx);
+ assert.equal(result.ok,true);assert.equal(f.calls[0].config.env.ANTHROPIC_AUTH_TOKEN,'private-route-token');assert.equal(f.calls[0].config.env.ANTHROPIC_DEFAULT_OPUS_MODEL,'auto/claude-opus');
+ assert.equal(f.calls[0].args[f.calls[0].args.indexOf('--setting-sources')+1],'');assert.equal(f.calls[0].args.includes('{"disableAllHooks":true}'),true);
+ assert.doesNotMatch(JSON.stringify(result),/private-route-token/);assert.equal(result.execution.authSource,'claude-user-routing-config');
 });

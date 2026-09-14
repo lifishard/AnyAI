@@ -11,6 +11,10 @@ import DeliveryPanel from './DeliveryPanel';
 import RecoveryCard from './RecoveryCard';
 import TaskFeedback from './TaskFeedback';
 import UserQuestionCard from './UserQuestionCard';
+import GatewayRecovery from './GatewayRecovery';
+import ClaudeRepair from './ClaudeRepair';
+import type { KeyProfile } from '../types';
+import type { GatewayRecoveryResult } from '../lib/gateway-recovery';
 
 /** finish_reason 的人话注解，鼠标悬停时显示 */
 const STOP_HINT: Record<string, string> = {
@@ -89,6 +93,9 @@ const KIND_ICON: Record<string, string> = {
 };
 
 function ErrorCard(props: {
+  gatewayProfile?:KeyProfile|null;
+  onGatewayReady?:(result:GatewayRecoveryResult)=>void;
+  claudeConnection?:boolean;
   raw: string;
   info?: ErrorInfo;
   onRetry?: () => void;
@@ -97,7 +104,9 @@ function ErrorCard(props: {
 }) {
   const info = props.info?.status === 404 && props.info.kind === 'model_missing'
     ? (() => { const updated = classifyError(props.info.detail, 404); return updated.kind === 'model_missing' ? props.info : updated; })()
-    : props.info;
+    : /STREAM_EARLY_EOF|stream ended before producing/i.test(props.info?.detail || props.raw)
+      ? classifyError(props.info?.detail || props.raw, props.info?.status)
+      : props.info || classifyError(props.raw, undefined);
   if (!info) {
     return (
       <div className="answer-error">
@@ -123,6 +132,7 @@ function ErrorCard(props: {
       ) : null}
 
       <div className="err-foot">
+        {props.claudeConnection ? <ClaudeRepair/> : info.kind==='network' || info.kind==='timeout' ? <GatewayRecovery profile={props.gatewayProfile} onReady={props.onGatewayReady}/> : null}
         {props.onRetry ? (
           <button className="btn sm primary" onClick={props.onRetry}>
             重新发送
@@ -211,6 +221,9 @@ export function StepTrace({ steps, live }: { steps: ToolStep[]; live: boolean })
  * ------------------------------------------------------------------ */
 
 export default function AnswerBlock(props: {
+  gatewayProfile?:KeyProfile|null;
+  onGatewayReady?:(result:GatewayRecoveryResult)=>void;
+  claudeConnection?:boolean;
   question: ChatMessage | null;
   answer: ChatMessage | null;
   showReasoning: boolean;
@@ -394,6 +407,9 @@ export default function AnswerBlock(props: {
 
       {answer?.error ? (
         <ErrorCard
+          gatewayProfile={props.gatewayProfile}
+          onGatewayReady={props.onGatewayReady}
+          claudeConnection={props.claudeConnection}
           raw={answer.error}
           info={answer.errorInfo}
           onRetry={props.onRetry}

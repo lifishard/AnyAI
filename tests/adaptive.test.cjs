@@ -198,6 +198,22 @@ function harness(chat,extra={}) {
 }
 function response(h,text,calls=[]) { h.onContent(text);h.onToolCalls(calls);h.onStop({reason:calls.length?'tool_calls':'stop',droppedCalls:0});h.onUsage({prompt_tokens:100,completion_tokens:50,total_tokens:150});h.onDone(); }
 
+test('a single repeating SSE response is aborted, saved, and never dispatched as tools or retried',async()=>{
+ const plan='好的，我现在清楚了数据结构，开始实现以下两件事情。\n\n1. 扩展 data/courses-seed.json 的 readings，使用真实数据补全。\n\n2. 在学期视图增加阅读清单展开面板，先读取当前文件确认结构。\n\n';
+ let aborts=0;
+ const h=harness(async(_,e)=>{for(let i=0;i<20 && !aborts;i++)e.onContent(plan);e.onToolCalls([{id:'not-executed',name:'read_file',arguments:'{"path":"C:/QA/file"}'}]);e.onError('请求已停止');e.onDone();},{abort:()=>aborts++});
+ await h.finished;assert.equal(aborts,1);assert.equal(h.log.requests.length,1);assert.equal(h.log.done,0);
+ const state=h.log.states.at(-1);assert.equal(state.status,'paused');assert.equal(state.errorInfo.kind,'loop_detected');assert.equal(state.steps.length,0);assert.ok(state.content.length>0);assert.ok(state.content.length<plan.length*20);
+ const resumed=harness(async(_,e)=>response(e,'已改用新模型完成核查。'),{requestId:'after-loop',resume:state,config:{...cfg(),model:'specific-model',enabledTools:['read_file']}});
+ await resumed.finished;assert.equal(resumed.log.done,1);assert.equal(resumed.log.requests.length,1);assert.equal(resumed.log.states.at(-1).working[0].content,'Continue task');
+});
+
+test('intentional repetitive output remains possible when the guard is disabled',async()=>{
+ const text='本段是用户要求重复展示的固定内容，包含明确的重复文本，以验证用户可以主动关闭复读检测。\n\n';
+ const h=harness(async(_,e)=>response(e,text.repeat(20)),{config:{...cfg(),enabledTools:['read_file'],runtime:{...cfg().runtime,loopGuard:false}}});
+ await h.finished;assert.equal(h.log.done,1);assert.equal(h.log.states.at(-1).content,text.repeat(20));
+});
+
 test('Chat to Work keeps decisions, attachments and saved context while enabling tools only for the new turn', async () => {
   const relay=load(file('src/lib/handoff.ts'));
   const question={id:'discuss',role:'user',content:'先讨论发布方案，名称保留灯芯AI。',createdAt:1,

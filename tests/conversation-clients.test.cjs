@@ -12,6 +12,23 @@ function fixture(t, overrides={}){
 test('official models and login are discovered without any renderer credential',async t=>{
   const f=fixture(t);const result=await f.host.check('codex');assert.equal(result.status,'ready');assert.deepEqual(result.models[0].efforts,['high']);assert.equal((await f.host.connect('codex')).status,'ready');assert.equal(f.opened.length,0);
 });
+
+test('Claude Code reports account, API key and custom API sources without assuming OmniRoute',async t=>{
+ const {EventEmitter}=require('node:events');
+ for(const [type,connection] of [['account',{env:{},baseUrl:null}],['api_key',{env:{ANTHROPIC_API_KEY:'PRIVATE_KEY'},baseUrl:null}],['custom_api',{env:{ANTHROPIC_BASE_URL:'https://company.example/anthropic',ANTHROPIC_AUTH_TOKEN:'PRIVATE_KEY'},baseUrl:'https://company.example/anthropic'}]]){
+  const f=fixture(t,{readClaudeConnection:()=>connection,validateClaudeBinary:()=>{},claudeGatewayCheck:async()=>null,spawn:(_binary,_args,options)=>{
+   assert.equal(options.shell,false);assert.equal(options.env.NODE_OPTIONS,undefined);
+   const p=new EventEmitter();p.kill=()=>{};queueMicrotask(()=>p.emit('close',0));return p;
+  }});
+  const result=await f.host.check('claude');assert.equal(result.status,'ready');assert.equal(result.connection.type,type);assert.match(result.message,/Claude Code CLI/);assert.doesNotMatch(JSON.stringify(result),/OmniRoute|PRIVATE_KEY/);
+ }
+});
+
+test('Claude repair checks the selected executable before any gateway startup',async t=>{
+ let repairs=0;
+ const f=fixture(t,{validateClaudeBinary:()=>{throw Error('Claude Desktop');},repairClaudeGateway:async()=>{repairs++;return {state:'ready'};}});
+ assert.equal((await f.host.repairClaude()).status,'error');assert.equal(repairs,0);
+});
 test('one-click connection starts official login only when an account is required',async t=>{
   const f=fixture(t,{createCodexClient:()=>({readAccount:async()=>({account:null}),login:async()=>({authUrl:'https://chatgpt.com/auth/test'}),close(){}})});
   assert.equal((await f.host.connect('codex')).status,'waiting_login');assert.equal(f.opened.length,1);

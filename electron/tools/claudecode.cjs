@@ -5,8 +5,9 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { StringDecoder } = require('node:string_decoder');
 const { ok, fail, guardPath, firstRoot, clip } = require('./common.cjs');
+const { readClaudeConnection } = require('../claude-connection.cjs');
 
-// Local official login only; no API credentials, gateway overrides or NODE_OPTIONS.
+// Clean base environment; the user's allowlisted connection settings are merged separately.
 function localLoginEnvironment(source) {
   const allowed = /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|COMSPEC|TEMP|TMP|TMPDIR|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|PROGRAMFILES|PROGRAMFILES\(X86\)|PROGRAMDATA|LANG|LC_ALL|TERM)$/i;
   return { ...Object.fromEntries(Object.entries(source).filter(([key]) => allowed.test(key))), NO_COLOR: '1', FORCE_COLOR: '0' };
@@ -19,7 +20,7 @@ function safeExtraArgs(value) {
   for (let i = 0; i < tokens.length; i += 2) {
     const flag = tokens[i], raw = tokens[i + 1];
     const item = raw && raw.replace(/^(["'])(.*)\1$/, '$2');
-    const valid = flag === '--model' ? /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,119}$/.test(item || '')
+    const valid = flag === '--model' ? /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,159}$/.test(item || '')
       : flag === '--effort' ? /^(low|medium|high|xhigh|max)$/.test(item || '')
         : flag === '--max-turns' ? /^(?:[1-9]|[1-9][0-9]|100)$/.test(item || '') : false;
     if (!valid || seen.has(flag)) throw Error('Claude Code 附加参数仅支持 --model、--effort 和 --max-turns；权限、认证与执行参数须由接入配置管理。');
@@ -29,6 +30,7 @@ function safeExtraArgs(value) {
 }
 function resolveNative(bin, env, platform, exists = fs.existsSync) {
   const chosen = String(bin || '').trim();
+  if(chosen && require('../claude-program.cjs').isClaudeDesktop(chosen))throw Error('选中的是 Claude Desktop，请选择 Claude Code CLI 原生程序。');
   if (chosen && /\.(cmd|bat|ps1|js)$/i.test(chosen)) throw Error('请配置官方 Claude Code 原生可执行文件，不能使用 shell 脚本或 npm 垫片。');
   const candidates = chosen ? [chosen] : [
     ...(env.USERPROFILE || env.HOME ? [path.join(env.USERPROFILE || env.HOME, '.local', 'bin', platform === 'win32' ? 'claude.exe' : 'claude')] : []),
@@ -36,7 +38,7 @@ function resolveNative(bin, env, platform, exists = fs.existsSync) {
   ];
   for (const file of candidates) {
     if (!path.isAbsolute(file) || (platform === 'win32' && !/\.exe$/i.test(file))) continue;
-    if (exists(file)) return file;
+    if (exists(file) && !require('../claude-program.cjs').isClaudeDesktop(file)) return file;
   }
   return require('../client-discovery.cjs').discoverClient('claude', {tools:{claudeBin:chosen}}, env, platform);
 }
@@ -45,16 +47,18 @@ function createClaudeCode(deps = {}) {
   const launch = deps.spawn || spawn, platform = deps.platform || process.platform;
   const environment = deps.env || process.env, later = deps.setTimeout || setTimeout, clear = deps.clearTimeout || clearTimeout;
   return function claudeCode(args = {}, ctx = {}) {
-    let cwd, command, extra;
+    let cwd, command, extra, connection;
     try {
       cwd = guardPath(args.cwd || firstRoot(ctx.workspaceRoots), ctx.workspaceRoots, { mustExist: true });
       if (!fs.statSync(cwd).isDirectory()) throw Error('Claude Code 工作目录必须是文件夹');
       if (!String(args.prompt || '').trim()) throw Error('prompt 不能为空');
       extra = safeExtraArgs(ctx.claudeExtraArgs);
       command = resolveNative(ctx.claudeBin, environment, platform, deps.exists);
+      (deps.validateBinary || require('../claude-program.cjs').assertClaudeCodeBinary)(command);
+      connection = (deps.readClaudeConnection || readClaudeConnection)(environment);
     } catch (e) { return Promise.resolve(fail(e)); }
     const runId = randomUUID(), startedAt = new Date().toISOString();
-    const record = (status, details = {}) => ({ runId, startedAt, finishedAt: new Date().toISOString(), provider: 'claude-code', authSource: 'official-client-local-login', status, ...details });
+    const record = (status, details = {}) => ({ runId, startedAt, finishedAt: new Date().toISOString(), provider: 'claude-code', authSource: connection.baseUrl ? 'claude-user-routing-config' : 'official-client-local-login', status, ...details });
     if (ctx.signal?.aborted) return Promise.resolve({ ...fail('Claude Code 已取消，尚未启动'), execution: record('cancelled'), cancelled: true });
     return new Promise(resolve => {
       let child, done = false, reason = null, stdout = '', bytes = 0, timer, stopTimer;
@@ -78,7 +82,7 @@ function createClaudeCode(deps = {}) {
       const cancel = () => stop('cancelled');
       try {
         child = launch(command, ['-p', '--output-format', 'json', '--permission-mode', 'dontAsk', '--setting-sources', '', '--settings', '{"disableAllHooks":true}', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', ...(ctx.chatOnly ? ['--tools', '', '--disallowedTools', 'mcp__*'] : []), ...extra], {
-          cwd, shell: false, windowsHide: true, detached: platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'], env: localLoginEnvironment(environment),
+          cwd, shell: false, windowsHide: true, detached: platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'], env: {...localLoginEnvironment(environment),...connection.env},
         });
       } catch { finish({ ...fail('无法启动 Claude Code 客户端'), execution: record('launch_failed') }); return; }
       timer = later(() => stop('timeout'), Math.min(3600000, Math.max(10000, Number(ctx.claudeTimeoutMs) || 600000)));

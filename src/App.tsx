@@ -1594,6 +1594,9 @@ export default function App() {
                     key={(t.a ?? t.q)!.id}
                     question={t.q}
                     answer={t.a}
+                    gatewayProfile={profile}
+                    claudeConnection={config.client?.kind==='claude'}
+                    onGatewayReady={r=>{if(r.baseUrl && profile)setSettings(s=>s?{...s,keyProfiles:s.keyProfiles.map(p=>p.id===profile.id && p.baseUrl===profile.baseUrl?{...p,baseUrl:r.baseUrl!}:p)}:s);}}
                     showReasoning={settings.showReasoningByDefault}
                     onOpenArtifact={setOpenArtifact}
                     onArtifactSaved={(artifact) => {

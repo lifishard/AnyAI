@@ -8,6 +8,8 @@ const { contextBridge, ipcRenderer } = require('electron');
  */
 contextBridge.exposeInMainWorld('snc', {
   platform: 'electron',
+  gatewayRepair: profileId => ipcRenderer.invoke('snc:gatewayRepair',profileId),
+  claudeRepair: () => ipcRenderer.invoke('snc:claudeRepair'),
   collaborationRead: () => ipcRenderer.invoke('snc:collaborationRead'),
   collaborationUpdate: (revision, project) => ipcRenderer.invoke('snc:collaborationUpdate', { revision, project }),
   collaborationClaim: (projectId, runId) => ipcRenderer.invoke('snc:collaborationClaim', { projectId, runId }),

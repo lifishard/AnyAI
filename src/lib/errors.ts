@@ -136,6 +136,13 @@ export function classifyError(
   }
 
   // SSE 中的错误可能没有 HTTP 错误状态，仍应正确识别限流。
+  if (/STREAM_EARLY_EOF|stream ended before producing/i.test(msg)) {
+    return mk('model_broken','网关连接已建立，但上游没有返回有效内容',[
+      '切换具体的可用路由，或在网关中检查当前供应商、账号状态与原始错误',
+      '可以关闭流式做一次对照诊断；这类错误不代表本机网关没有启动',
+      '已有任务现场会保留，避免连续点击重新发送',
+    ]);
+  }
   if (status === undefined && /rate.?limit|tpm|rpm|too many requests|限流/i.test(msg)) {
     return mk('rate_limit', '暂时达到调用额度，等待后继续', [], { retryable: true, retryAfterMs: parseRetryAfter(msg) });
   }

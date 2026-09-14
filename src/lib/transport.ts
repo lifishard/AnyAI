@@ -52,6 +52,8 @@ interface NativeEvent {
 }
 
 interface ElectronBridge {
+  gatewayRepair(profileId:string):Promise<import('./gateway-recovery').GatewayRecoveryResult>;
+  claudeRepair():Promise<import('./connections').ClientStatus>;
   conversationClientCheck(kind:import('./connections').ClientKind):Promise<import('./connections').ClientStatus>;
   conversationClientConnect(kind:import('./connections').ClientKind):Promise<import('./connections').ClientStatus>;
   conversationClientRun(args:{runId:string;requestId:string;prompt:string;cwd?:string}):Promise<import('./connections').ClientTurnResult>;

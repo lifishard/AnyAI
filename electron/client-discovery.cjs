@@ -8,6 +8,7 @@ function children(dir) {
 function discoverClient(kind, settings = {}, env = process.env, platform = process.platform) {
   if (!KINDS.includes(kind)) throw Error('未知连接器');
   const configured = String((kind === 'claude' ? settings.tools?.claudeBin : settings.clients?.[kind + 'Bin']) || '').trim();
+  if(kind==='claude' && configured && require('./claude-program.cjs').isClaudeDesktop(configured))throw Error('选中的是 Claude Desktop。请为 Claude Code 选择 CLI 原生程序。');
   const home = env.USERPROFILE || env.HOME, suffix = platform === 'win32' ? '.exe' : '';
   const candidates = configured ? [configured] : [
     ...(home ? [path.join(home, '.local', 'bin', kind + suffix), path.join(home, '.cargo', 'bin', kind + suffix)] : []),
@@ -53,6 +54,7 @@ function discoverClient(kind, settings = {}, env = process.env, platform = proce
     if (!path.isAbsolute(file) || /\.(cmd|bat|ps1|js|mjs|cjs)$/i.test(file) || (platform === 'win32' && !/\.exe$/i.test(file))) continue;
     try {
       const real = fs.realpathSync(file);
+      if(kind==='claude' && require('./claude-program.cjs').isClaudeDesktop(real))continue;
       if (/\.(cmd|bat|ps1|js|mjs|cjs)$/i.test(real) || (platform === 'win32' && !/\.exe$/i.test(real))) continue;
       if (fs.statSync(real).isFile()) return real;
     } catch {}

@@ -41,6 +41,7 @@ import { endExchange } from './wiretap';
 import { calibratedTokens, capabilities, dispatchBudget, nearContextSuggestion, observeInput, outputReserve, prepareBody, quotaKey, routeKey, snapshot, workingBudget, RUNTIME_VERSION } from './adaptive';
 import { compressionCandidate, memoryInstructions, memoryView, readContext, updatePlan, validateCompaction } from './context-memory';
 import { handoffInfo, repeatedWithoutProgress, type ConversationMemory } from './handoff';
+import { repeatedReadCycle, repetitionWatchdog } from './loop-guard';
 import { deliveryReport, recoveryInfo, updateRequirements, verifyRequirements } from './delivery';
 import {
   formatUserAnswers,
@@ -557,13 +558,13 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
                 questionParseError = e instanceof Error ? e.message : String(e);
               }
             }
-            if (!parseError && !state.replanPending && repeatedWithoutProgress(state,call.name,parsed)) {
+            if (!parseError && !state.replanPending && (repeatedWithoutProgress(state,call.name,parsed) || (cfg.runtime?.loopGuard!==false && repeatedReadCycle(state,call.name,parsed)))) {
               const blocked:ToolStep={id:`step-${state.runId}-${state.round}-${i}`,callId:call.id,name:call.name,args:parsed,
                 status:'denied',summary:'重复操作已暂停',output:'此操作未执行：连续相同操作没有新结果，请改用已有证据或调整方法。',startedAt:Date.now()};
               state.steps!.push(blocked);events.onStep({...blocked});
               state.working.push({id:uid('m'),role:'tool',toolCallId:call.id,toolName:call.name,content:blocked.output!,createdAt:Date.now()});
               state.toolCursor=i+1;
-              await finishPause('连续三次相同操作返回相同结果，尚无新进展。已暂停以避免继续消耗；请补充信息、调整方法或切换模型后接着跑。'); return;
+              await finishPause('连续三次相同操作或读取循环返回相同结果，尚无新进展。已暂停以避免继续消耗；请补充信息、调整方法或切换模型后接着跑。'); return;
             }
             const id = `step-${state.runId}-${state.round}-${i}`;
             const old = state.steps!.find((s) => s.id === id);
@@ -773,6 +774,8 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           state.status = 'running'; state.nextRetryAt = undefined; state.reason = undefined;
           await save();
           let recordedWait = 0;
+          const loopWatch=repetitionWatchdog();
+          let loopDetected=false;
           await transport.chat({ requestId, runId: state.runId, round: state.round, attempt: attempts,
             purpose: final ? 'final' : 'agent', url: endpoint(args.profile.baseUrl, 'chat/completions'),
             headers: buildHeaders(args.apiKey, args.profile), body, stream: cfg.stream, timeoutMs: args.timeoutMs,
@@ -780,7 +783,13 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
             paceInput: bodyTokens, paceOutput: outputAllowance, paceItpm: cap.itpm, paceOtpm: cap.otpm, cachedInputCounts: cap.cachedInputCounts,
             paceMinMs: Math.max(cap.rpm ? Math.ceil(60000/cap.rpm) : 0, pacingFloor(learned ? { ...learned, tpm: undefined } : undefined, 0)),
           }, {
-            onContent(d) { dispatched = true; resultContent += d; events.onContentDelta(d); },
+            onContent(d) {
+              if(loopDetected)return;
+              dispatched = true; resultContent += d; events.onContentDelta(d);
+              if(cfg.toolsEnabled && !final && cfg.runtime?.loopGuard!==false && loopWatch.push(d)){
+                loopDetected=true;void transport.abort(requestId).catch(()=>{});
+              }
+            },
             onReasoning(d) { dispatched = true; resultReasoning += d; events.onReasoningDelta(d); },
             onToolCalls(c) { calls = c; },
             onStop(s) { stop = s; },
@@ -818,6 +827,13 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           stat.detail = failure.message;
           observeInput(body,args.profile,cfg,usage?.prompt_tokens);
           if (control.signal.aborted) throw abortError();
+          if(loopDetected){
+            state.content=committedContent+resultContent;state.reasoning=committedReasoning+resultReasoning;
+            state.failedRequestId=requestId;stat.outcome='failed';stat.failureKind='loop_detected';
+            const detail='本次响应连续重复大段相同内容，执行器已中止接收；这次响应中的工具调用没有执行。';
+            endExchange(requestId,detail);
+            await finishPause('检测到回复复读，已暂停并保存现场',{kind:'loop_detected',title:'检测到回复复读，已暂停并保存现场',detail,retryable:false,blameModel:false,fixes:['切换为支持工具调用的具体模型，再点“接着跑”；原要求和已执行步骤会保留','如果任务本来要求大量重复文字，可在配置中关闭“检测回复复读与读取循环”后继续']});return;
+          }
           // A completed HTTP stream is not proof that the model response was complete.
           const stopValue = stop as StopInfo;
           if (!failure.message && (!stopValue.reason || stopValue.droppedCalls > 0 || (calls.length && new Set(calls.map((c) => c.id)).size !== calls.length))) {

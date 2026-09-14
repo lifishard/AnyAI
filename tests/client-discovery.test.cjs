@@ -19,6 +19,22 @@ test('finds Claude official npm native payload without executing a shim',t=>{
  assert.equal(discoverClient('claude',{},f.env,'win32'),exe);
  assert.equal(resolveNative('',f.env,'win32'),exe);
 });
+
+test('Claude Desktop cannot be selected or discovered as Claude Code',t=>{
+ const f=fixture(t),desktop=f.file(f.root,'Claude','app-1.0','Claude.exe');f.env.PATH=require('node:path').dirname(desktop);
+ assert.throws(()=>discoverClient('claude',{tools:{claudeBin:desktop}},f.env,'win32'),/Claude Desktop/);
+ assert.throws(()=>resolveNative(desktop,f.env,'win32'),/Claude Desktop/);
+ assert.throws(()=>discoverClient('claude',{},f.env,'win32'),/Claude Code/);
+ const cli=f.file(f.env.APPDATA,'npm','node_modules','@anthropic-ai','claude-code','bin','claude.exe');
+ assert.equal(discoverClient('claude',{},f.env,'win32'),cli);
+});
+
+test('Claude Code identity requires its version signature, not just an executable filename',()=>{
+ const {assertClaudeCodeBinary}=require('../electron/claude-program.cjs');
+ assert.doesNotThrow(()=>assertClaudeCodeBinary('/cli/claude.exe',()=> '2.1.270 (Claude Code)\n'));
+ assert.throws(()=>assertClaudeCodeBinary('/cli/claude.exe',()=> '1.0.0 (Claude Desktop)'),/CLI 标识/);
+ let executed=false;assert.throws(()=>assertClaudeCodeBinary('/Applications/Claude.app/Contents/MacOS/Claude',()=>{executed=true;}),/Claude Desktop/);assert.equal(executed,false);
+});
 test('quoted PATH works and explicit invalid paths never silently select another client',t=>{
  const f=fixture(t),exe=f.file(f.root,'with spaces','codex.exe');f.env.PATH='"'+path.dirname(exe)+'"';
  assert.equal(discoverClient('codex',{},f.env,'win32'),exe);
