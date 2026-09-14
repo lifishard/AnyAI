@@ -38,7 +38,7 @@ function resolveNative(bin, env, platform, exists = fs.existsSync) {
     if (!path.isAbsolute(file) || (platform === 'win32' && !/\.exe$/i.test(file))) continue;
     if (exists(file)) return file;
   }
-  throw Error('未找到 Claude Code 原生客户端，请安装官方客户端并自行登录，或在设置中填写其绝对路径。');
+  return require('../client-discovery.cjs').discoverClient('claude', {tools:{claudeBin:chosen}}, env, platform);
 }
 // Injectable process boundary permits offline tests without model calls.
 function createClaudeCode(deps = {}) {

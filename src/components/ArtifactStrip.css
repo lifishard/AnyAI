@@ -1,0 +1,223 @@
+.artifact-strip.artifact-strip--compact {
+  min-width: 0;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-strong);
+}
+
+.artifact-strip--compact > summary,
+.artifact-file-row > summary {
+  list-style: none;
+}
+
+.artifact-strip--compact > summary::-webkit-details-marker,
+.artifact-file-row > summary::-webkit-details-marker {
+  display: none;
+}
+
+.artifact-strip-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 26px;
+  padding: 2px 0;
+  color: var(--fg-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.artifact-strip-summary:focus-visible,
+.artifact-file-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+.artifact-strip-chevron,
+.artifact-file-chevron {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  color: var(--fg-faint);
+}
+
+.artifact-strip-chevron::before,
+.artifact-file-chevron::before {
+  content: '▸';
+}
+
+.artifact-strip--compact[open] > .artifact-strip-summary .artifact-strip-chevron::before,
+.artifact-file-row[open] > .artifact-file-summary .artifact-file-chevron::before {
+  content: '▾';
+}
+
+.artifact-strip-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.artifact-strip-count {
+  flex: 0 0 auto;
+  min-width: 18px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.artifact-strip-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin-top: 4px;
+}
+
+.artifact-file-row {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+}
+
+.artifact-file-row:last-child {
+  border-bottom: 1px solid var(--border);
+}
+
+.artifact-file-row:hover {
+  background: var(--bg-hover);
+}
+
+.artifact-file-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 5px 2px;
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.artifact-file-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.artifact-file-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 4px 8px;
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.artifact-file-direction,
+.artifact-file-type,
+.artifact-file-size,
+.artifact-file-verify {
+  flex: 0 0 auto;
+}
+
+.artifact-file-direction--input {
+  color: var(--accent);
+}
+
+.artifact-file-direction--output {
+  color: var(--fg-dim);
+}
+
+.artifact-file-type,
+.artifact-file-size {
+  font-family: var(--mono);
+  color: var(--fg-faint);
+}
+
+.artifact-file-verify--verified {
+  color: var(--ok);
+}
+
+.artifact-file-verify--pending {
+  color: var(--warn);
+}
+
+.artifact-file-verify--inline {
+  color: var(--fg-faint);
+}
+
+.artifact-file-detail {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 4px 8px 10px 31px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-sunken) 42%, transparent);
+}
+
+.artifact-file-status {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.artifact-file-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.artifact-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.artifact-file-error {
+  overflow-wrap: anywhere;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+@media (max-width: 600px) {
+  .artifact-file-summary {
+    align-items: flex-start;
+    padding-block: 7px;
+  }
+
+  .artifact-file-meta {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 48%;
+    white-space: normal;
+    text-align: right;
+  }
+
+  .artifact-file-detail {
+    padding-left: 25px;
+  }
+}
+
+@media (max-width: 390px) {
+  .artifact-file-type {
+    display: none;
+  }
+
+  .artifact-file-meta {
+    max-width: 44%;
+  }
+}

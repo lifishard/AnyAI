@@ -68,6 +68,7 @@ import {
   type ScheduledTask,
 } from './lib/schedule';
 import AnswerBlock from './components/AnswerBlock';
+import ActivityPanel, { hasActivity } from './components/ActivityPanel';
 import SelectionActions from './components/SelectionActions';
 import Composer from './components/Composer';
 import ConfigPanel from './components/ConfigPanel';
@@ -119,6 +120,7 @@ export default function App() {
   const [observationsOpen,setObservationsOpen] = React.useState(false);
   const [settingsTab, setSettingsTab] = React.useState<string>('keys');
   const [configOpen, setConfigOpen] = React.useState(false);
+  const [activityOpen, setActivityOpen] = React.useState(true);
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
   const [preview, setPreview] = React.useState<string | null>(null);
   const [info, setInfo] = React.useState<{ encryptionAvailable: boolean; storePath: string } | null>(
@@ -1553,6 +1555,8 @@ export default function App() {
           {!profile ? <span className="chip warn">未配置凭据</span> : null}
           <span className="chip">{config.model || '未选模型'}</span>
 
+          {msgs.some(hasActivity) ? <button className="btn sm" aria-pressed={activityOpen && !configOpen && !openArtifact} onClick={() => { setActivityOpen(!(activityOpen && !configOpen && !openArtifact)); setConfigOpen(false); setOpenArtifact(null); }}>任务动态</button> : null}
+
           <button className="btn sm" onClick={() => setConfigOpen((v) => !v)}>
             ⚙ 配置
           </button>
@@ -1644,6 +1648,8 @@ export default function App() {
           </>
         )}
       </main>
+
+      {activityOpen && !teamVisible && !configOpen && !openArtifact ? <ActivityPanel key={`activity-${active?.id}`} messages={msgs} onHide={() => setActivityOpen(false)} /> : null}
 
       {openArtifact && !teamVisible ? (
         <>

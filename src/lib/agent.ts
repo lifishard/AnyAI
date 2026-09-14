@@ -367,7 +367,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     if (!persistenceFailed) await save();
     ended = true;
     events.onNotice('');
-    if (info) events.onError(reason, info);
+    if (info) events.onError(info.detail || reason, info);
     else if (events.onPaused) events.onPaused(reason);
     else events.onDone();
   };

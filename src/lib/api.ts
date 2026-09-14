@@ -4,6 +4,7 @@ import { composeSystem } from './system';
 import { getTransport } from './transport';
 
 export const BASE_URL_PRESETS = [
+  { label: 'OpenRouter（含免费模型路由）', url: 'https://openrouter.ai/api/v1' },
   {
     label: '日日新 Token 端点（免费额度，OpenAI 兼容）',
     url: 'https://token.sensenova.cn/v1',

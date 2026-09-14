@@ -107,6 +107,34 @@ export function classifyError(
     extra: Partial<ErrorInfo> = {},
   ): ErrorInfo => ({ ...base, kind, title, fixes, ...extra });
 
+  // OpenRouter also uses 404 when a valid model has no eligible endpoints.
+  // Match the routing reason before generic HTTP handling (including SSE errors).
+  if (has(lower, /data policy|guardrail restrictions|zdr violation|zdr-violation|zero data retention/)) {
+    return mk('routing_policy', '账号隐私或路由限制排除了可用端点', [
+      '到 OpenRouter 的 https://openrouter.ai/settings/privacy 核对 ZDR（零数据留存）和免费端点设置',
+      '只有接受对应端点的数据政策时才调整设置；也可以保留当前隐私要求，选择符合要求的模型',
+      '这不是模型 ID 或 Base URL 写错；应用不会自动放宽账号隐私限制',
+    ]);
+  }
+  if (has(lower, /no endpoints?.*(image|vision)|support image input/)) {
+    return mk('multimodal', '当前模型没有支持图片输入的可用端点', [
+      '选择支持图片输入的模型，或在新对话中只发送文字',
+      '历史消息中的图片也会随上下文发送，仅删除本轮附件可能仍会被拒绝',
+    ]);
+  }
+  if (has(lower, /no endpoints?.*(tool|function)|no providers?.*support.*tool/)) {
+    return mk('tools_unsupported', '当前模型没有支持工具调用的可用端点', [
+      '选择支持工具调用的模型；免费路由会按本次请求需要的能力筛选端点',
+      '纯文字聊天也可能带有询问工具，请使用支持工具的模型继续当前任务',
+    ]);
+  }
+  if (has(lower, /no (available )?endpoints? (found|available)|0 endpoints/)) {
+    return mk('route_unavailable', '当前请求没有可用的上游端点', [
+      '查看下方上游原文，核对模型支持的能力、路由条件和账号设置',
+      '刷新模型列表后选择另一个可用模型；免费端点的供应情况可能变化',
+    ]);
+  }
+
   // SSE 中的错误可能没有 HTTP 错误状态，仍应正确识别限流。
   if (status === undefined && /rate.?limit|tpm|rpm|too many requests|限流/i.test(msg)) {
     return mk('rate_limit', '暂时达到调用额度，等待后继续', [], { retryable: true, retryAfterMs: parseRetryAfter(msg) });
@@ -183,7 +211,6 @@ export function classifyError(
   /* ---------------- 404 / 模型不存在 ---------------- */
 
   if (
-    status === 404 ||
     has(lower, /model.{0,12}(not found|not exist|does not exist|unavailable)|no such model|unknown model|模型不存在/)
   ) {
     return mk(
@@ -196,6 +223,13 @@ export function classifyError(
       ],
       { blameModel: true },
     );
+  }
+
+  if (status === 404) {
+    return mk('route_unavailable', '上游未找到这次请求对应的资源', [
+      '查看上游原文，确认是模型、请求路径还是路由条件导致的 404',
+      '核对 API 凭据中的 Base URL，并刷新模型列表',
+    ]);
   }
 
   /* ---------------- 5xx：上游自己坏了 ---------------- */

@@ -46,7 +46,7 @@ function createConversationClients({ userData, getSettings, store, openExternal,
   const cleanModels = data => (data || []).slice(0,500).filter(m => typeof (m.model || m.id) === 'string').map(m => ({id:(m.model || m.id).slice(0,160),label:String(m.displayName || m.name || m.model || m.id).slice(0,160),efforts:(m.supportedReasoningEfforts || []).map(e=>e.reasoningEffort).filter(e=>typeof e==='string').slice(0,12),defaultEffort:m.defaultReasoningEffort}));
   async function check(kind) {
     if (!KINDS.includes(kind)) throw Error('未知连接器');
-    let binary; try { binary = discover(kind); } catch(error) { return {kind,status:'missing',models:[],message:error.message}; }
+    let binary; try { binary = discover(kind); } catch(error) { return {kind,status:error.code === 'DESKTOP_ONLY' ? 'installed' : 'missing',models:[],message:error.message}; }
     let client;
     try {
       if (kind === 'codex') {

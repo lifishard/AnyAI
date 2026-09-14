@@ -3,6 +3,7 @@ import type { Artifact } from '../types';
 import { previewable, toPreviewHtml } from '../lib/artifacts';
 import { desktop } from '../lib/transport';
 import Markdown from './Markdown';
+import './ArtifactStrip.css';
 
 const ICON: Record<string, string> = {
   ics: '🗓',
@@ -19,6 +20,17 @@ const ICON: Record<string, string> = {
   code: '📄',
   other: '📄',
 };
+
+function formatArtifactSize(size: number | undefined): string {
+  if (size === undefined) return '';
+  return size < 1024 ? `${size} B` : `${(size / 1024).toFixed(1)} KB`;
+}
+
+function artifactStatus(a: Artifact): { compact: string; full: string } {
+  if (!a.path) return { compact: '对话内', full: '文件内容在对话中，可保存' };
+  if (a.verifiedAt) return { compact: '已核实', full: '已核实文件路径' };
+  return { compact: '待核实', full: '历史文件记录，打开时核实' };
+}
 
 function FileCard({ artifact: a, onOpen, onSaved }: { artifact: Artifact; onOpen: (a: Artifact) => void; onSaved?: (a: Artifact) => void }) {
   const bridge = desktop();
@@ -40,35 +52,51 @@ function FileCard({ artifact: a, onOpen, onSaved }: { artifact: Artifact; onOpen
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } else throw new Error('请在保存该文件的桌面端打开');
   };
-  return <div className="artifact-card file-card">
-    <button className="file-card-preview" onClick={() => onOpen(a)}>
-      <span className="artifact-icon">{ICON[a.type] ?? '📄'}</span>
-      <span className="file-card-description"><strong title={a.path ?? a.name}>{a.name}</strong>
-        <small>{a.direction === 'input' ? '输入文件' : '输出文件'} · {a.type.toUpperCase()}{a.size !== undefined ? ` · ${a.size < 1024 ? `${a.size} B` : `${(a.size/1024).toFixed(1)} KB`}` : ''}</small>
+  const status = artifactStatus(a);
+  const direction = a.direction === 'input' ? '输入文件' : '输出文件';
+  const size = formatArtifactSize(a.size);
+
+  return <details className="artifact-file-row">
+    <summary className="artifact-file-summary" aria-label={`展开 ${a.name} 的路径及操作`}>
+      <span className="artifact-file-chevron" aria-hidden="true" />
+      <span className="artifact-icon" aria-hidden="true">{ICON[a.type] ?? '📄'}</span>
+      <span className="artifact-file-name" title={a.path ?? a.name}>{a.name}</span>
+      <span className="artifact-file-meta">
+        <span className={`artifact-file-direction artifact-file-direction--${a.direction ?? 'output'}`}>{direction}</span>
+        <span className="artifact-file-type">{a.type.toUpperCase()}</span>
+        {size ? <span className="artifact-file-size">{size}</span> : null}
+        <span className={`artifact-file-verify artifact-file-verify--${a.path ? a.verifiedAt ? 'verified' : 'pending' : 'inline'}`}>{status.compact}</span>
       </span>
-    </button>
-    <div className="file-status">{a.path ? a.verifiedAt ? '已核实文件路径' : '历史文件记录，打开时核实' : '文件内容在对话中，可保存'}</div>
-    {a.path ? <div className="file-card-path" title={a.path}>{a.path}</div> : null}
-    <div className="file-card-actions">
-      {a.path && bridge ? <>
-        <button className="btn sm" disabled={working} onClick={() => void action(async () => { const err = await bridge.openPath(a.path!); if (err) throw new Error(err); })}>打开</button>
-        <button className="btn sm" disabled={working} onClick={() => void action(() => bridge.revealPath(a.path!))}>在文件夹中显示</button>
-      </> : null}
-      {(bridge?.saveArtifact || a.text !== undefined) ? <button className="btn sm" disabled={working} onClick={() => void action(save)}>{a.path ? '另存为' : '保存文件'}</button> : null}
+    </summary>
+    <div className="artifact-file-detail">
+      <div className="artifact-file-status">{status.full}</div>
+      {a.path ? <code className="artifact-file-path" title={a.path}>{a.path}</code> : null}
+      <div className="artifact-file-actions">
+        <button type="button" className="btn sm" onClick={() => onOpen(a)}>查看预览</button>
+        {a.path && bridge ? <>
+          <button type="button" className="btn sm" disabled={working} onClick={() => void action(async () => { const err = await bridge.openPath(a.path!); if (err) throw new Error(err); })}>打开</button>
+          <button type="button" className="btn sm" disabled={working} onClick={() => void action(() => bridge.revealPath(a.path!))}>在文件夹中显示</button>
+        </> : null}
+        {(bridge?.saveArtifact || a.text !== undefined) ? <button type="button" className="btn sm" disabled={working} onClick={() => void action(save)}>{a.path ? '另存为' : '保存文件'}</button> : null}
+      </div>
+      {error ? <div className="artifact-file-error" role="alert">{error}</div> : null}
     </div>
-    {error ? <div className="file-card-error" role="alert">{error}</div> : null}
-  </div>;
+  </details>;
 }
 
 /** Input and output records are visible without opening the side panel. */
 export function ArtifactStrip(props: { artifacts: Artifact[]; onOpen: (a: Artifact) => void; onSaved?: (a: Artifact) => void }) {
   if (!props.artifacts.length) return null;
-  return <div className="artifact-strip">
-    <div className="sources-label">本轮文件与产物 · {props.artifacts.length}</div>
-    <div className="file-card-grid">
+  return <details className="artifact-strip artifact-strip--compact">
+    <summary className="artifact-strip-summary">
+      <span className="artifact-strip-chevron" aria-hidden="true" />
+      <span className="artifact-strip-title">本轮文件与产物</span>
+      <span className="artifact-strip-count">{props.artifacts.length}</span>
+    </summary>
+    <div className="artifact-strip-list">
       {props.artifacts.map((a) => <FileCard key={a.id} artifact={a} onOpen={props.onOpen} onSaved={props.onSaved} />)}
     </div>
-  </div>;
+  </details>;
 }
 
 /* ------------------------------------------------------------------ *

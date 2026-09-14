@@ -743,6 +743,8 @@ export interface Transport {
 /* ---------------- 错误分类与模型健康度 ---------------- */
 
 export type ErrorKind =
+  | 'routing_policy'
+  | 'route_unavailable'
   | 'auth'            // key 不对 / 没权限
   | 'rate_limit'      // tpm / rpm / 并发打满
   | 'quota'           // 余额或配额用尽

@@ -4,10 +4,9 @@ import type { UserQuestionAnswers } from '../lib/user-questions';
 import { typeOfPath } from '../lib/artifacts';
 import { ArtifactStrip } from './ArtifactPanel';
 import { TOOL_BY_NAME } from '../lib/tools/registry';
-import { isCleanStop } from '../lib/errors';
+import { classifyError, isCleanStop } from '../lib/errors';
 import Markdown from './Markdown';
 import MessageNotes from './MessageNotes';
-import MilestonePanel from './MilestonePanel';
 import DeliveryPanel from './DeliveryPanel';
 import RecoveryCard from './RecoveryCard';
 import TaskFeedback from './TaskFeedback';
@@ -96,7 +95,9 @@ function ErrorCard(props: {
   /** 400 时的「自动排查」；不传就不显示那个按钮 */
   onProbe?: () => void;
 }) {
-  const info = props.info;
+  const info = props.info?.status === 404 && props.info.kind === 'model_missing'
+    ? (() => { const updated = classifyError(props.info.detail, 404); return updated.kind === 'model_missing' ? props.info : updated; })()
+    : props.info;
   if (!info) {
     return (
       <div className="answer-error">
@@ -139,7 +140,7 @@ function ErrorCard(props: {
         ) : null}
         <details className="err-raw">
           <summary>上游原文</summary>
-          <pre>{props.raw}</pre>
+          <pre>{info.detail || props.raw}</pre>
         </details>
       </div>
     </div>
@@ -329,7 +330,6 @@ export default function AnswerBlock(props: {
         onDelete={(id) => props.onDeleteAnnotation(question.id, id)} /> : null}
 
       {sources.length ? <SourcesRow sources={sources} /> : null}
-      {steps.length ? <StepTrace steps={steps} live={live} /> : null}
 
       {answer?.reasoning && answer.reasoning.trim() ? (
         <details className="reasoning" open={props.showReasoning && live && !answer.content}>
@@ -390,9 +390,7 @@ export default function AnswerBlock(props: {
           <p>此处记录上下文交付状态；模型是否理解准确仍需看后续行动和验收结果。</p>
         </div>
       </details> : null}
-      <MilestonePanel items={answer?.milestones ?? answer?.runState?.milestones} steps={answer?.steps ?? answer?.runState?.steps} />
       <DeliveryPanel report={answer?.delivery ?? answer?.runState?.delivery} visible={Boolean(answer && !answer.pending && (answer.milestones?.length || answer.delivery?.requirements.length || answer.steps?.length))}/>
-      {answer?.progress ? <div className="saved-progress"><strong>已保存的进度</strong><div>{answer.progress}</div></div> : null}
 
       {answer?.error ? (
         <ErrorCard

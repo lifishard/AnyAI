@@ -1,6 +1,6 @@
 {
   "name": "wickrunai",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "灯芯AI（wickrunAI）：使用自己的 API Key，在同一任务中切换模型，查资料、处理文件、运行本地工具。",
   "private": true,
   "type": "module",
