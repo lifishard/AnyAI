@@ -52,6 +52,12 @@ interface NativeEvent {
 }
 
 interface ElectronBridge {
+  nativeAiState():Promise<import('./native-ai').NativeAiState>;
+  nativeAiConfigure():Promise<{state:import('./native-ai').NativeAiState;message:string}>;
+  nativeAiCreate(input:import('./native-ai').NativeAiInput):Promise<{task:import('./native-ai').NativeAiTask;prompt:string}>;
+  nativeAiOpen(provider:import('./native-ai').NativeAiProvider,taskId?:string):Promise<{prompt:string}>;
+  nativeAiCancel(id:string):Promise<import('./native-ai').NativeAiState>;
+  nativeAiRemove(id:string):Promise<import('./native-ai').NativeAiState>;
   gatewayRepair(profileId:string):Promise<import('./gateway-recovery').GatewayRecoveryResult>;
   claudeRepair():Promise<import('./connections').ClientStatus>;
   conversationClientCheck(kind:import('./connections').ClientKind):Promise<import('./connections').ClientStatus>;

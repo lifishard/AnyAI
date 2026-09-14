@@ -4,6 +4,7 @@ import {CLIENT_LABELS,type ClientKind,type ClientSelection,type ClientStatus} fr
 import type {AppSettings} from '../types';
 import './ClientConnections.css';
 import ClaudeRepair from './ClaudeRepair';
+import NativeAiPanel from './NativeAiPanel';
 let sessionStatuses:Partial<Record<ClientKind,ClientStatus>>={};
 
 export default function ClientConnections({selection,onSelect,settings,onSettings}:{selection?:ClientSelection;onSelect:(value:ClientSelection|undefined)=>void;settings:AppSettings;onSettings:(patch:Partial<AppSettings>)=>void}) {
@@ -37,7 +38,7 @@ export default function ClientConnections({selection,onSelect,settings,onSetting
           </select></label></div>}
         </div>;
       })}
-      <div className="client-row" aria-label="Claude Desktop 桌面应用"><div className="client-heading"><strong>Claude Desktop</strong><span className="hint">独立桌面应用 · 未接入</span></div><p>桌面中的聊天会话与 Claude Code CLI 分开。当前灯芯AI 没有接管这些聊天会话，不能将桌面程序选作本任务的执行器。</p></div>
+      <NativeAiPanel settings={settings}/>
       <p className="hint">账号登录与 API 凭据按所选客户端配置。Chat 不允许改文件；Work 沿用各客户端支持的权限机制，未支持的操作会暂停。</p>
     </>}
     <div className="client-row"><strong>Grok · 其他 AI</strong><p>在 API 凭据中添加官方密钥或兼容服务地址。Grok 地址：https://api.x.ai/v1。消费版订阅不等于 API 授权。</p><button className="btn sm ghost" onClick={()=>onSelect(undefined)}>使用 API 接入</button></div>

@@ -25,6 +25,7 @@ let restoringData = false;
 let storageStartupError = null;
 let localClients = null;
 let conversationClients = null;
+let nativeAiBridge = null;
 const activeToolControllers = new Map();
 function dataAvailable(){if(storageStartupError)throw Error('本地记录需要恢复，已停止读写：'+storageStartupError);if(restoringData)throw Error('正在恢复数据，请等待重启');const error=dataBackup?.recoveryError;if(error)throw Error('数据恢复未完成，已停止读写：'+error);}
 
@@ -323,13 +324,22 @@ function registerIpc() {
     const bundle=fs.readFileSync(file,'utf8'),summary=dataBackup.preview({bundle}),token=require('node:crypto').randomUUID();importedBackups.clear();importedBackups.set(token,bundle);return {input:{token},summary};
   });
   ipcMain.handle('snc:backupRestore',(_e,input)=>{
-    if(inflight.size||activeToolControllers.size||localClients?.busy()||conversationClients?.busy())throw Error('还有模型或工具操作正在结束，请等待完成后恢复');
+    if(inflight.size||activeToolControllers.size||localClients?.busy()||conversationClients?.busy()||nativeAiBridge?.busy())throw Error('还有模型或工具操作正在结束，请等待完成后恢复');
     const source=input?.id?{id:input.id}:input?.token&&importedBackups.has(input.token)?{bundle:importedBackups.get(input.token)}:null;if(!source)throw Error('请先预览要恢复的备份');
     restoringData=true;try{dataBackup.restore(source);app.relaunch();app.exit(0);}catch(error){restoringData=false;throw error;}
   });
   ipcMain.handle('snc:toolAbort',(_e,runId)=>{conversationClients?.abort(runId);localClients?.abort(runId);for(const rec of activeToolControllers.values())if(rec.runId===runId||rec.teamRunId===runId)rec.controller.abort();});
   const collaboration = require('./collaboration-store.cjs').createCollaborationStore(app.getPath('userData'));
   const gatewayRecovery = require('./gateway-recovery.cjs').createGatewayRecovery({getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),secretGet:id=>store.secretGet(id),getClaudeConnection:()=>require('./claude-connection.cjs').readClaudeConnection()});
+  const nativeBridge=()=>{dataAvailable();if(!nativeAiBridge)nativeAiBridge=require('./native-ai-bridge.cjs').createNativeAiBridge({userData:app.getPath('userData'),appData:app.getPath('appData'),getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),secretGet:id=>store.secretGet(id),openExternal:url=>shell.openExternal(url)});return nativeAiBridge;};
+  ipcMain.handle('snc:nativeAiState',async()=>{const bridge=nativeBridge();await bridge.start();return bridge.state();});
+  ipcMain.handle('snc:nativeAiConfigure',()=>nativeBridge().configureClaude());
+  ipcMain.handle('snc:nativeAiCreate',(_e,input)=>nativeBridge().create(input));
+  ipcMain.handle('snc:nativeAiOpen',(_e,{provider,taskId})=>nativeBridge().open(provider,taskId));
+  ipcMain.handle('snc:nativeAiCancel',(_e,id)=>nativeBridge().cancel(id));
+  ipcMain.handle('snc:nativeAiRemove',(_e,id)=>nativeBridge().remove(id));
+  // Existing MCP clients can reconnect before the user opens the connection panel.
+  if(require('node:fs').existsSync(path.join(app.getPath('userData'),'native-ai')))try{void nativeBridge().start().catch(error=>console.error('Native AI bridge:',error.message));}catch(error){console.error('Native AI bridge:',error.message);}
   ipcMain.handle('snc:gatewayRepair',(_event,profileId)=>{dataAvailable();return gatewayRecovery.repair(profileId);});
   const teamFiles = require('./team-files.cjs').createTeamFiles(app.getPath('userData'));
   try{if(!dataBackup.recoveryError)localClients=require('./local-clients.cjs').createLocalClients({userData:app.getPath('userData'),collaboration,teamFiles,getSettings:()=>JSON.parse(store.kvGet('snc:settings:v1')||'{}'),openExternal:url=>shell.openExternal(url)});}catch(error){storageStartupError=String(error);}
@@ -509,6 +519,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', () => {
+    nativeAiBridge?.close();
     localClients?.close();
     conversationClients?.close();
     for (const [, rec] of inflight) {

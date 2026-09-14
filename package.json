@@ -1,6 +1,6 @@
 {
   "name": "wickrunai",
-  "version": "2.1.4",
+  "version": "2.1.5",
   "description": "灯芯AI（wickrunAI）：使用自己的 API Key，在同一任务中切换模型，查资料、处理文件、运行本地工具。",
   "private": true,
   "type": "module",
@@ -9,9 +9,9 @@
   "license": "Apache-2.0",
   "scripts": {
     "dev": "vite",
-    "dev:electron": "concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env SNC_DEV_URL=http://localhost:5173 electron .\"",
-    "build": "tsc --noEmit && vite build",
-    "start:electron": "electron .",
+    "dev:electron": "node scripts/build-native-mcp.mjs && concurrently -k \"vite\" \"wait-on tcp:5173 && cross-env SNC_DEV_URL=http://localhost:5173 electron .\"",
+    "build": "node scripts/build-native-mcp.mjs && tsc --noEmit && vite build",
+    "start:electron": "node scripts/build-native-mcp.mjs && electron .",
     "dist:win": "npm run build && node scripts/package-release.mjs --win",
     "dist:mac": "npm run build && node scripts/package-release.mjs --mac",
     "dist:linux": "npm run build && node scripts/package-release.mjs --linux",
@@ -25,7 +25,7 @@
     "test": "node --test tests/*.test.cjs",
     "check:lite": "node scripts/check-lite.mjs",
     "sync": "node scripts/sync-github.mjs",
-    "build:fast": "vite build",
+    "build:fast": "node scripts/build-native-mcp.mjs && vite build",
     "dist:win:fast": "npm run build:fast && node scripts/package-release.mjs --win",
     "init-repo": "node scripts/init-repo.mjs",
     "release": "node scripts/sync-github.mjs --release",
@@ -35,6 +35,7 @@
     "@capacitor/android": "^7.0.0",
     "@capacitor/core": "^7.0.0",
     "@capacitor/preferences": "^7.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "docx": "^9.1.0",
     "dompurify": "^3.2.4",
     "highlight.js": "^11.11.1",
@@ -44,7 +45,8 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "ws": "^8.18.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.0.0",
@@ -59,7 +61,8 @@
     "electron-builder": "^25.1.8",
     "typescript": "^5.7.3",
     "vite": "^6.1.0",
-    "wait-on": "^8.0.2"
+    "wait-on": "^8.0.2",
+    "esbuild": "^0.25.12"
   },
   "build": {
     "appId": "dev.anyai.desktop",

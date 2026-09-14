@@ -8,6 +8,12 @@ const { contextBridge, ipcRenderer } = require('electron');
  */
 contextBridge.exposeInMainWorld('snc', {
   platform: 'electron',
+  nativeAiState: () => ipcRenderer.invoke('snc:nativeAiState'),
+  nativeAiConfigure: () => ipcRenderer.invoke('snc:nativeAiConfigure'),
+  nativeAiCreate: input => ipcRenderer.invoke('snc:nativeAiCreate',input),
+  nativeAiOpen: (provider,taskId) => ipcRenderer.invoke('snc:nativeAiOpen',{provider,taskId}),
+  nativeAiCancel: id => ipcRenderer.invoke('snc:nativeAiCancel',id),
+  nativeAiRemove: id => ipcRenderer.invoke('snc:nativeAiRemove',id),
   gatewayRepair: profileId => ipcRenderer.invoke('snc:gatewayRepair',profileId),
   claudeRepair: () => ipcRenderer.invoke('snc:claudeRepair'),
   collaborationRead: () => ipcRenderer.invoke('snc:collaborationRead'),
