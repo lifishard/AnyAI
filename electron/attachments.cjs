@@ -24,8 +24,29 @@ const IMAGE_MIME = {
   '.bmp': 'image/bmp',
 };
 
-const MAX_TEXT = 1024 * 1024; // 1MB
-const MAX_IMAGE = 6 * 1024 * 1024; // 6MB，base64 之后约 8MB
+// Keep these limits in step with src/lib/attachment-limits.ts.  The renderer
+// and native clients use the same values when they accept pasted/remote files.
+const MIB = 1024 * 1024;
+const MAX_TEXT = 25 * MIB;
+const MAX_IMAGE = 20 * MIB;
+const MAX_BATCH = 100 * MIB;
+
+function limitLabel(bytes) {
+  return `${Math.round(bytes / MIB)}MB`;
+}
+
+function validateAttachmentSize(kind, size, name = '附件') {
+  const max = kind === 'image' ? MAX_IMAGE : MAX_TEXT;
+  if (!Number.isFinite(size) || size < 0) return `${name} 大小无效。`;
+  if (size <= max) return undefined;
+  return `${name} 有 ${(size / MIB).toFixed(1)}MB，超过${kind === 'image' ? '图片' : '文本'}附件 ${limitLabel(max)} 上限。请分批或压缩后重试。`;
+}
+
+function validateAttachmentBatch(totalBytes) {
+  if (!Number.isFinite(totalBytes) || totalBytes < 0) return '附件总大小无效。';
+  if (totalBytes <= MAX_BATCH) return undefined;
+  return `本次附件合计 ${(totalBytes / MIB).toFixed(1)}MB，超过 ${limitLabel(MAX_BATCH)} 总上限。请分批添加。`;
+}
 
 function readOne(p) {
   const name = path.basename(p);
@@ -38,9 +59,8 @@ function readOne(p) {
   }
 
   if (IMAGE_MIME[ext]) {
-    if (size > MAX_IMAGE) {
-      return { error: `${name} 有 ${(size / 1048576).toFixed(1)}MB，超过 6MB 上限。先压一下。` };
-    }
+    const error = validateAttachmentSize('image', size, name);
+    if (error) return { error };
     const b64 = fs.readFileSync(p).toString('base64');
     return {
       kind: 'image',
@@ -51,9 +71,8 @@ function readOne(p) {
     };
   }
 
-  if (size > MAX_TEXT) {
-    return { error: `${name} 有 ${(size / 1048576).toFixed(1)}MB，文本附件上限 1MB。` };
-  }
+  const sizeError = validateAttachmentSize('text', size, name);
+  if (sizeError) return { error: sizeError };
 
   const looksText = TEXT_EXT.has(ext) || TEXT_EXT.has(name.toLowerCase()) || ext === '';
   const buf = fs.readFileSync(p);
@@ -74,11 +93,37 @@ function readOne(p) {
 
 function readFiles(paths) {
   const out = [];
+  let batchBytes = 0;
   for (const p of paths || []) {
+    let size = 0;
+    try {
+      size = fs.statSync(p).size;
+    } catch {
+      // readOne returns the detailed, user-facing read error below.
+    }
+    if (size && validateAttachmentBatch(batchBytes + size)) {
+      out.push({
+        path: p,
+        error: `本次选择的附件已超过 ${limitLabel(MAX_BATCH)} 总上限，未读取 ${path.basename(p)}。请分批添加。`,
+      });
+      continue;
+    }
     const r = readOne(p);
     out.push(Object.assign({ path: p }, r));
+    if (!r.error) batchBytes += size;
   }
   return out;
 }
 
-module.exports = { readFiles, TEXT_EXT, IMAGE_MIME };
+module.exports = {
+  readFiles,
+  TEXT_EXT,
+  IMAGE_MIME,
+  MIB,
+  MAX_TEXT,
+  MAX_IMAGE,
+  MAX_BATCH,
+  limitLabel,
+  validateAttachmentSize,
+  validateAttachmentBatch,
+};

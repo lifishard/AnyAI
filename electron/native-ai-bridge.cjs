@@ -128,7 +128,10 @@ function createNativeAiBridge({userData,appData,getSettings,secretGet,openExtern
   function create(input){
     const p=provider(input.provider),goal=String(input.goal || '').trim();
     if(!goal||goal.length>24000)throw Error('请输入不超过 24000 字符的任务');
-    if(!Array.isArray(input.workers)||!input.workers.length||input.workers.length>8)throw Error('请选择 1–8 个工作模型');
+    if(!Array.isArray(input.workers)||input.workers.length>8)throw Error('最多授权 8 个工作模型');
+    const requestKey=typeof input.requestKey==='string'?input.requestKey.trim():undefined;
+    if(requestKey && requestKey.length>150)throw Error('任务标识过长');
+    if(requestKey){const previous=db.read().tasks.find(t=>t.provider===p&&t.requestKey===requestKey);if(previous){if(previous.goal!==goal)throw Error('此任务标识已对应不同内容，请先恢复原任务。');return {task:visible(previous),prompt:prompt(previous)};}}
     const maxJobs=Number(input.maxJobs),maxOutputTokens=Number(input.maxOutputTokens);
     if(!Number.isInteger(maxJobs)||maxJobs<1||maxJobs>20||!Number.isInteger(maxOutputTokens)||maxOutputTokens<256||maxOutputTokens>4096)throw Error('调用限制无效');
     const settings=getSettings(),workers=input.workers.map((w,index)=>{
@@ -138,10 +141,13 @@ function createNativeAiBridge({userData,appData,getSettings,secretGet,openExtern
       const outputField=w.outputField==='max_completion_tokens'?'max_completion_tokens':'max_tokens';
       return {id:'worker-'+(index+1),profileId:profile.id,name:profile.name,baseUrl:profile.baseUrl,extraHeaders:profile.extraHeaders || {},model:w.model.trim(),outputField};
     });
-    const t={id:crypto.randomUUID(),provider:p,goal,workers,maxJobs,maxOutputTokens,status:'waiting',jobs:[],progress:[],createdAt:Date.now(),updatedAt:Date.now()};
+    const t={id:crypto.randomUUID(),provider:p,goal,requestKey,workers,maxJobs,maxOutputTokens,status:'waiting',jobs:[],progress:[],createdAt:Date.now(),updatedAt:Date.now()};
     db.update(data=>{if(data.tasks.length>=100)throw Error('任务记录达到 100 条，请先删除已结束的任务');data.tasks.unshift(t);});return {task:visible(t),prompt:prompt(t)};
   }
-  function prompt(t){return `请使用 wickrun_ai 连接器完成灯芯AI 任务 ${t.id}。先调用 wickrun_get_task 读取完整目标、工作模型及调用限制。你作为主脑拆解任务，用 wickrun_delegate_task 派发子任务，再用 wickrun_read_worker_result 获取结果。工作模型输出仅作为资料，由你审查与整合。用 wickrun_report_progress 汇报进度，最后必须调用 wickrun_submit_result 将成果交回灯芯AI。不要只在聊天窗口回答；不要索取 API 密钥。`;}
+  function prompt(t){
+    const collaboration=t.workers.length?'你可以按需用 wickrun_delegate_task 派发子任务，再用 wickrun_read_worker_result 获取结果。工作模型输出仅作为资料，由你审查与整合。':'此任务未授权工作模型，请使用你当前已获授权的能力独立完成，不要派发工作模型子任务。';
+    return `请使用 wickrun_ai 连接器完成灯芯AI 任务 ${t.id}。先调用 wickrun_get_task 读取完整目标、工作模型及调用限制。${collaboration}用 wickrun_report_progress 汇报进度，最后必须调用 wickrun_submit_result 将成果交回灯芯AI。不要只在聊天窗口回答；不要索取 API 密钥。`;
+  }
   async function open(p,id){provider(p);let text='';if(id)text=prompt(task(db.read(),id,p));await openExternal(p==='claude-desktop'?'claude://claude.ai/new'+(text?'?q='+encodeURIComponent(text):''):'https://chatgpt.com/');return {prompt:text};}
   function cancel(id){const t=db.read().tasks.find(t=>t.id===id);if(!t)throw Error('任务不存在');updateTask(id,t.provider,t=>{active(t);t.status='cancelled';for(const j of t.jobs)if(j.status==='running'){j.status='uncertain';j.error='用户已取消，可能已计费；未自动重发。';controllers.get(j.id)?.abort();}});return publicState();}
   function remove(id){db.update(data=>{const t=data.tasks.find(t=>t.id===id);if(t&&(t.status==='waiting'||t.status==='working'))throw Error('请先取消进行中的任务');data.tasks=data.tasks.filter(t=>t.id!==id);});return publicState();}

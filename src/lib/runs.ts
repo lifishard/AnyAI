@@ -31,8 +31,9 @@ export async function saveRun(record: RunRecord): Promise<void> {
   }
   fallbackChain = fallbackChain.catch(() => {}).then(async () => {
     if (forgotten.has(snapshot.id) || forgottenConversations.has(snapshot.conversationId)) return;
+    const next=new Map(records);next.set(snapshot.id,snapshot);
+    await getTransport().kvSet(KEY, JSON.stringify([...next.values()]));
     records.set(snapshot.id, snapshot);
-    await getTransport().kvSet(KEY, JSON.stringify([...records.values()]));
     await observeRun(snapshot);
   });
   await fallbackChain;
@@ -55,6 +56,14 @@ export async function forgetRuns(conversationId: string, answerIds?: Set<string>
 
 export function runRecord(id:string):RunRecord|undefined {const r=records.get(id);return r?structuredClone(r):undefined;}
 export function runTitle(id:string):string|undefined {const r=records.get(id);return r?(r.question.content.trim().replace(/\s+/g,' ').slice(0,96)||r.title):undefined;}
+/** The run journal already owns durable checkpoints. Avoid duplicating them in every chat save. */
+export function conversationsForStorage(list:Conversation[]):Conversation[]{
+  return list.map(c=>({...c,messages:c.messages.map(m=>{
+    const record=records.get(m.runState?.runId||m.taskId||'');
+    if(!record||record.conversationId!==c.id||record.answerId!==m.id||record.state.at<(m.runState?.at??0))return m;
+    return {...m,runState:undefined,subagents:m.subagents?.map(j=>({...j,checkpoint:undefined}))};
+  })}));
+}
 /** Recover even if the conversation's debounced save had not yet happened. */
 export function recoverConversations(original: Conversation[], saved: RunRecord[]): Conversation[] {
   const list = original.map((c) => ({ ...c, messages: [...c.messages] }));
@@ -79,7 +88,7 @@ export function recoverConversations(original: Conversation[], saved: RunRecord[
       reasoning: state.reasoning ?? existing?.reasoning, steps: state.steps ?? existing?.steps,
       sources: state.sources, usage: state.usage, runState: completed ? undefined : recovered,
       milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery ?? deliveryReport(state), taskId:r.id, supplementalInputs:state.supplementalInputs, handoff:state.handoff,
-      userQuestionHistory: state.userQuestionHistory,
+      userQuestionHistory: state.userQuestionHistory,harness:state.harness,subagents:state.subagents,
       progress: completed ? undefined : localProgress(state.steps ?? [], recovered.reason),
       artifacts: [...(existing?.artifacts ?? []), ...collectArtifacts(state.content ?? '', state.steps ?? [])]
         .filter((a, i, all) => all.findIndex((b) => b.path && a.path ? b.path === a.path && b.direction === a.direction : b.id === a.id) === i),

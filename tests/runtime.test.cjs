@@ -77,6 +77,33 @@ test('durable checkpoints, backup recovery, tombstones and complete evidence pag
   assert.equal(text,raw);
   store.remove('run'); store.save(record); assert.equal(store.list().length,0);
 });
+test('streaming run checkpoints do not re-read or copy the prior record', (t) => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'anyai-run-hotpath-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  let reads=0, copies=0;
+  const io={...fs,
+    readFileSync(...args){ reads++; return fs.readFileSync(...args); },
+    copyFileSync(...args){ copies++; return fs.copyFileSync(...args); },
+  };
+  const store=require('../electron/run-store.cjs').createRunStore(dir,{io});
+  const record={id:'hot',conversationId:'conv',answerId:'a',state:{working:[],content:'first'}};
+  store.save(record);
+  const readsAfterFirst=reads;
+  store.save({...record,state:{working:[],content:'second'}});
+  assert.equal(reads,readsAfterFirst);
+  assert.equal(copies,0);
+  const runFile=path.join(dir,'runs',fs.readdirSync(path.join(dir,'runs')).find(name=>name.endsWith('.json')));
+  assert.equal(JSON.parse(fs.readFileSync(runFile+'.prev','utf8')).state.content,'first');
+});
+test('restart lists a run when interruption leaves only its .prev backup', (t) => {
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'anyai-run-prev-only-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const {createRunStore}=require('../electron/run-store.cjs');
+  const store=createRunStore(dir), record={id:'prev-only',conversationId:'conv',answerId:'a',state:{working:[],content:'checkpoint'}};
+  store.save(record);
+  const runFile=path.join(dir,'runs',fs.readdirSync(path.join(dir,'runs')).find(name=>name.endsWith('.json')));
+  fs.renameSync(runFile,runFile+'.prev');
+  const restarted=createRunStore(dir);
+  assert.equal(restarted.list()[0].state.content,'checkpoint');
+});
 test('file cards require actual files in allowed roots; ICS and input metadata preserved', (t) => {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'anyai-files-')); t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
   const p=path.join(dir,'课程 日历.ics'); fs.writeFileSync(p,'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n');

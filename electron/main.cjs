@@ -78,6 +78,7 @@ function savedBounds() {
 }
 
 let boundsTimer = null;
+let quitFlushed=false,quitFlushing=false;
 function rememberBounds(win) {
   if (boundsTimer) clearTimeout(boundsTimer);
   boundsTimer = setTimeout(() => {
@@ -87,7 +88,7 @@ function rememberBounds(win) {
       const maximized = win.isMaximized();
       // 最大化时存「还原后」的尺寸，否则取消最大化会得到一个全屏大小的小窗口
       const b = maximized ? win.getNormalBounds() : win.getBounds();
-      store.kvSet(BOUNDS_KEY, JSON.stringify({ ...b, maximized }));
+      void Promise.resolve(store.kvSet(BOUNDS_KEY, JSON.stringify({ ...b, maximized }))).catch(error=>console.error('Window bounds save:',error.message));
     } catch {
       /* 存不上就算了，不值得为它崩一个窗口 */
     }
@@ -124,13 +125,13 @@ function createWindow() {
   }
   // 关窗那一下也存一次：防抖的 400ms 可能还没到就退出了
   mainWindow.on('close', () => {
+    if(quitFlushed)return;
     if (boundsTimer) clearTimeout(boundsTimer);
     try {
       dataAvailable();
       const maximized = mainWindow.isMaximized();
       const b = maximized ? mainWindow.getNormalBounds() : mainWindow.getBounds();
-      store.kvSet(BOUNDS_KEY, JSON.stringify({ ...b, maximized }));
-      if (store.flush) store.flush();
+      void Promise.resolve(store.kvSet(BOUNDS_KEY, JSON.stringify({ ...b, maximized }))).catch(error=>console.error('Window bounds save:',error.message));
     } catch {
       /* 同上 */
     }
@@ -310,6 +311,7 @@ function registerIpc() {
   ipcMain.handle('snc:backupStatus',()=>({...dataBackup.status(),storePath:path.join(app.getPath('userData'),'store.json')}));
   ipcMain.handle('snc:backupList',()=>dataBackup.list());
   ipcMain.handle('snc:backupCreate',async(_e,mode)=>{
+    await store.flush();
     if(mode==='local')return dataBackup.create({mode});
     if(mode!=='export')throw Error('备份类型无效');
     const chosen=await dialog.showSaveDialog(mainWindow,{defaultPath:path.join(app.getPath('downloads'),'wickrunAI-backup.json'),filters:[{name:'wickrunAI 备份',extensions:['json']}]});
@@ -323,10 +325,10 @@ function registerIpc() {
     const fs=require('node:fs'),file=chosen.filePaths[0];if(fs.statSync(file).size>dataBackup.status().limits.bundleBytes)throw Error('备份文件超过大小限制');
     const bundle=fs.readFileSync(file,'utf8'),summary=dataBackup.preview({bundle}),token=require('node:crypto').randomUUID();importedBackups.clear();importedBackups.set(token,bundle);return {input:{token},summary};
   });
-  ipcMain.handle('snc:backupRestore',(_e,input)=>{
+  ipcMain.handle('snc:backupRestore',async(_e,input)=>{
     if(inflight.size||activeToolControllers.size||localClients?.busy()||conversationClients?.busy()||nativeAiBridge?.busy())throw Error('还有模型或工具操作正在结束，请等待完成后恢复');
     const source=input?.id?{id:input.id}:input?.token&&importedBackups.has(input.token)?{bundle:importedBackups.get(input.token)}:null;if(!source)throw Error('请先预览要恢复的备份');
-    restoringData=true;try{dataBackup.restore(source);app.relaunch();app.exit(0);}catch(error){restoringData=false;throw error;}
+    restoringData=true;try{await store.flush();dataBackup.restore(source);app.relaunch();app.exit(0);}catch(error){restoringData=false;throw error;}
   });
   ipcMain.handle('snc:toolAbort',(_e,runId)=>{conversationClients?.abort(runId);localClients?.abort(runId);for(const rec of activeToolControllers.values())if(rec.runId===runId||rec.teamRunId===runId)rec.controller.abort();});
   const collaboration = require('./collaboration-store.cjs').createCollaborationStore(app.getPath('userData'));
@@ -481,7 +483,7 @@ function registerIpc() {
 
   ipcMain.handle('snc:remoteStart', async (_e, { port, token }) => {
     dataAvailable();const t = token || remote.newToken();
-    store.kvSet('snc:remote:token', t);
+    await store.kvSet('snc:remote:token', t);
     return remote.start(port, t);
   });
   ipcMain.handle('snc:remoteStop', () => remote.stop());
@@ -506,6 +508,10 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     registerIpc();
+    if(!storageStartupError){
+      void chromeLaunch.restore().catch(error=>console.error('Chrome connection restore:',error.message));
+      void conversationClients?.restore().catch(error=>console.error('Native connection restore:',error.message));
+    }
     buildMenu();
     createWindow();
 
@@ -518,7 +524,11 @@ if (!app.requestSingleInstanceLock()) {
     if (process.platform !== 'darwin') app.quit();
   });
 
-  app.on('before-quit', () => {
+  app.on('before-quit', (event) => {
+    if(quitFlushed)return;
+    event.preventDefault();
+    if(quitFlushing)return;
+    quitFlushing=true;
     nativeAiBridge?.close();
     localClients?.close();
     conversationClients?.close();
@@ -528,6 +538,18 @@ if (!app.requestSingleInstanceLock()) {
     }
     inflight.clear();
     remote.stop();
-    store.flush();
+    void (async()=>{
+      try{
+        if(mainWindow&&!mainWindow.isDestroyed()&&!restoringData){
+          const maximized=mainWindow.isMaximized(),b=maximized?mainWindow.getNormalBounds():mainWindow.getBounds();
+          await store.kvSet(BOUNDS_KEY,JSON.stringify({...b,maximized}));
+        }
+        await store.flush();quitFlushed=true;app.quit();
+      }catch(error){
+        quitFlushing=false;
+        const result=await dialog.showMessageBox({type:'error',title:'尚有记录未保存',message:'保存记录失败，应用尚未退出。',detail:String(error.message||error),buttons:['重试保存','退出，仅保留已保存记录'],defaultId:0,cancelId:0});
+        if(result.response===1){quitFlushed=true;app.quit();}else app.quit();
+      }
+    })();
   });
 }

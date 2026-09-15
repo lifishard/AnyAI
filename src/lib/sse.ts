@@ -258,6 +258,7 @@ export function createStreamConsumer(h: {
     try {
       json = JSON.parse(payload);
     } catch {
+      h.onError?.('上游流中包含无法解析的数据，响应未完整接收；已有内容已保留。');
       return;
     }
     apply(json);

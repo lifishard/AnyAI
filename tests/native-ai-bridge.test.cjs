@@ -49,6 +49,19 @@ test('configuration preserves existing servers and rejects malformed files',asyn
   const changed=JSON.parse(fs.readFileSync(file,'utf8'));assert.equal(changed.theme,'dark');assert.equal(changed.mcpServers.existing.command,'somewhere');assert.equal(changed.mcpServers.wickrun_ai.command,process.execPath);assert.ok(fs.existsSync(file+'.prev'));
   fs.writeFileSync(file,'invalid json');await assert.rejects(f.bridge.configureClaude(),/数据读取失败/);assert.equal(fs.readFileSync(file,'utf8'),'invalid json');
 });
+
+test('conversation handoff permits no workers and stable request key prevents duplicate desktop tasks',async t=>{
+  const f=fixture(t);const first=f.create({workers:[],requestKey:'conversation-turn'});
+  const again=f.create({workers:[],requestKey:'conversation-turn'});
+  assert.equal(first.id,again.id);assert.equal(f.bridge.state().tasks.length,1);assert.equal(first.workers.length,0);
+  assert.throws(()=>f.create({goal:'different task',workers:[],requestKey:'conversation-turn'}),/不同内容/);
+  const handoff=await f.bridge.open('claude-desktop',first.id);
+  assert.match(handoff.prompt,/未授权工作模型/);assert.match(handoff.prompt,/独立完成/);
+  assert.doesNotMatch(handoff.prompt,/wickrun_delegate_task/);assert.match(handoff.prompt,/wickrun_submit_result/);
+  await f.bridge.config('claude-desktop');
+  const response=await f.rpc('claude-desktop','submit_result',{taskId:first.id,text:'独立完成后的结果'});
+  assert.equal(response.status,200);assert.equal(f.requests.length,0);
+});
 test('provider isolation, origin rejection, cancellation and call budget are enforced in host',async t=>{
   const f=fixture(t);await f.bridge.config('claude-desktop');await f.bridge.config('chatgpt');const task=f.create({maxJobs:1});
   assert.equal((await f.rpc('chatgpt','get_task',{taskId:task.id})).status,400);

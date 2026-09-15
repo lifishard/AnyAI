@@ -1,0 +1,16 @@
+.gateway-recovery {
+  display: grid;
+  justify-items: start;
+  gap: 5px;
+  margin: 10px 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.gateway-recovery.compact {
+  margin: 3px 0 0;
+}
+
+.gateway-recovery [role='status']:empty {
+  display: none;
+}

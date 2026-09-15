@@ -174,6 +174,7 @@ export interface ParamState {
 
 /** 一次会话的全部生成配置 */
 export interface GenerationConfig {
+  subagents?: import('./lib/subagents').SubagentConfig;
   client?: import('./lib/connections').ClientSelection;
   model: string;
   stream: boolean;
@@ -214,6 +215,7 @@ export interface GenerationConfig {
     runtimeMigrationVersion?: number;
     milestones?: boolean;
     loopGuard?: boolean;
+    harness?: 'guided' | 'off';
   };
 }
 
@@ -321,6 +323,8 @@ export interface Usage {
 }
 
 export interface ChatMessage {
+  harness?: import('./lib/harness').HarnessCheckpoint;
+  subagents?: import('./lib/subagents').SubagentJob[];
   contextKind?: 'handoff';
   handoff?: HandoffInfo;
   id: string;
@@ -386,6 +390,9 @@ export interface ChatMessage {
 
 /** 中断现场。够用来无缝续跑，也够小到能塞进 localStorage */
 export interface RunState {
+  nativeDesktop?:{taskId?:string;prompt?:string;status?:string};
+  harness?: import('./lib/harness').HarnessCheckpoint;
+  subagents?: import('./lib/subagents').SubagentJob[];
   contextHandoff?: { id: string; at: number; inputTokens: number };
   contextArchive?: ChatMessage[];
   contextArchiveSteps?: ToolStep[];

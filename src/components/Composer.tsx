@@ -18,6 +18,7 @@ import ClientConnections from './ClientConnections';
 import {CLIENT_LABELS} from '../lib/connections';
 import ContextMeter, { type ContextPreview } from './ContextMeter';
 import { routeKey } from '../lib/adaptive';
+import {validateAttachmentSize,validateAttachmentBatch} from '../lib/attachment-limits';
 
 const APPROVAL_OPTIONS: { value: ApprovalMode; label: string; desc: string }[] = [
   {
@@ -40,6 +41,7 @@ const APPROVAL_OPTIONS: { value: ApprovalMode; label: string; desc: string }[] =
 type SendMode = 'chat' | 'work';
 
 export default function Composer(props: {
+  controls?:React.ReactNode;
   initialDraft?: string;
   onDraftChange?: (text: string) => void;
   client?:import('../lib/connections').ClientSelection;
@@ -115,7 +117,17 @@ export default function Composer(props: {
   onDropQueued: (index: number) => void;
 }) {
   const [text, setText] = React.useState(props.initialDraft ?? '');
-  React.useEffect(() => { props.onDraftChange?.(text); }, [text]);
+  const [attachmentError,setAttachmentError]=React.useState('');
+  // Keep keystrokes local; synchronizing every key repaints and saves the entire conversation.
+  const draftSink = React.useRef(props.onDraftChange);
+  draftSink.current = props.onDraftChange;
+  const latestDraft = React.useRef(text); latestDraft.current = text;
+  React.useEffect(() => {
+    if (!text) { draftSink.current?.(text); return; }
+    const timer = setTimeout(() => draftSink.current?.(text), 600);
+    return () => clearTimeout(timer);
+  }, [text]);
+  React.useEffect(() => () => draftSink.current?.(latestDraft.current), []);
   const [localMode, setLocalMode] = React.useState<SendMode>(props.sendMode ?? 'work');
   const contextDraft = React.useMemo(() => ({ id:'draft', role:'user' as const, content:text, createdAt:0,
     attachments:props.attachments, quotes:props.quotes, quoteOnly:props.quoteOnly && props.quotes.length > 0 }),[text,props.attachments,props.quotes,props.quoteOnly]);
@@ -231,6 +243,9 @@ export default function Composer(props: {
     if (!images.length) return;
 
     e.preventDefault(); // 别让它同时把文件名之类的文本也粘进来
+    const error=images.map(f=>validateAttachmentSize('image',f.size,f.name)).find(Boolean)||validateAttachmentBatch([...props.attachments,...images].reduce((n,f)=>n+f.size,0));
+    setAttachmentError(error || '');
+    if(error)return;
     for (const f of images) {
       const reader = new FileReader();
       reader.onload = () => {
@@ -357,6 +372,8 @@ export default function Composer(props: {
             </div>
           ) : null}
 
+          {props.controls}
+          {attachmentError?<p role="alert" className="hint">{attachmentError}</p>:null}
           <textarea
             ref={ref}
             rows={1}

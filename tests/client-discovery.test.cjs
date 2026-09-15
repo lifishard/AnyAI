@@ -1,6 +1,6 @@
 const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { discoverClient } = require('../electron/client-discovery.cjs');
+const { discoverClient, readClientState, rememberClientState } = require('../electron/client-discovery.cjs');
 const { resolveNative } = require('../electron/tools/claudecode.cjs');
 function fixture(t) {
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'client-discovery-'));
@@ -46,4 +46,12 @@ test('finds uv Kimi CLI and distinguishes desktop-only installation',t=>{
  assert.throws(()=>discoverClient('kimi',{},f.env,'win32'),e=>e.code==='DESKTOP_ONLY');
  const exe=f.file(f.env.APPDATA,'uv','tools','kimi-cli','Scripts','kimi.exe');
  assert.equal(discoverClient('kimi',{},f.env,'win32'),exe);
+});
+
+test('a validated discovered executable survives restart without PATH while explicit settings still win',t=>{
+ const f=fixture(t),first=f.file(f.root,'installed','codex.exe'),explicit=f.file(f.root,'chosen','codex.exe');
+ assert.equal(rememberClientState(f.root,'codex',{binary:first,status:'ready'}),true);
+ const reopened=readClientState(f.root);assert.equal(reopened.clients.codex.binary,first);assert.equal(reopened.clients.codex.status,'ready');
+ assert.equal(discoverClient('codex',{},f.env,'win32',reopened.clients.codex.binary),first);
+ assert.equal(discoverClient('codex',{clients:{codexBin:explicit}},f.env,'win32',reopened.clients.codex.binary),explicit);
 });

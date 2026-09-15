@@ -1,16 +1,47 @@
 'use strict';
-const fs = require('node:fs'), path = require('node:path');
+const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
 const KINDS = ['codex', 'claude', 'kimi'];
+const STATE_VERSION = 1;
+
+function stateFile(userData) { return path.join(path.resolve(userData), 'conversation-clients', 'connections.json'); }
+function readClientState(userData) {
+  try {
+    const value = JSON.parse(fs.readFileSync(stateFile(userData), 'utf8'));
+    if (value?.version !== STATE_VERSION || !value.clients || typeof value.clients !== 'object' || Array.isArray(value.clients)) return {version:STATE_VERSION,clients:{}};
+    return value;
+  } catch { return {version:STATE_VERSION,clients:{}}; }
+}
+function rememberClientState(userData, kind, update) {
+  if (!KINDS.includes(kind) || !path.isAbsolute(userData)) return false;
+  const current = readClientState(userData), previous = current.clients[kind] || {};
+  let binary = typeof update?.binary === 'string' ? update.binary : previous.binary;
+  try {
+    if (!path.isAbsolute(binary) || /\.(cmd|bat|ps1|js|mjs|cjs)$/i.test(binary) || (process.platform === 'win32' && !/\.exe$/i.test(binary))) return false;
+    binary = fs.realpathSync(binary);
+    if (!fs.statSync(binary).isFile()) return false;
+  } catch { return false; }
+  const status = typeof update?.status === 'string' && update.status.length <= 40 ? update.status : previous.status;
+  const next = {version:STATE_VERSION,clients:{...current.clients,[kind]:{binary,status,lastCheckedAt:Date.now()}}};
+  const target = stateFile(userData), tmp = `${target}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(target),{recursive:true});
+    fs.writeFileSync(tmp,JSON.stringify(next),{mode:0o600});
+    fs.renameSync(tmp,target);
+    return true;
+  } catch { return false; }
+  finally { try { fs.unlinkSync(tmp); } catch { /* renamed or never written */ } }
+}
 // Only inspect bounded, known installation directories. Never launch shell shims.
 function children(dir) {
   try { return fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name).sort((a,b) => b.localeCompare(a, undefined, { numeric:true })).slice(0,32); } catch { return []; }
 }
-function discoverClient(kind, settings = {}, env = process.env, platform = process.platform) {
+function discoverClient(kind, settings = {}, env = process.env, platform = process.platform, remembered = '') {
   if (!KINDS.includes(kind)) throw Error('未知连接器');
   const configured = String((kind === 'claude' ? settings.tools?.claudeBin : settings.clients?.[kind + 'Bin']) || '').trim();
   if(kind==='claude' && configured && require('./claude-program.cjs').isClaudeDesktop(configured))throw Error('选中的是 Claude Desktop。请为 Claude Code 选择 CLI 原生程序。');
   const home = env.USERPROFILE || env.HOME, suffix = platform === 'win32' ? '.exe' : '';
   const candidates = configured ? [configured] : [
+    ...(typeof remembered === 'string' && remembered.trim() ? [remembered.trim()] : []),
     ...(home ? [path.join(home, '.local', 'bin', kind + suffix), path.join(home, '.cargo', 'bin', kind + suffix)] : []),
     ...String(env.PATH || env.Path || '').split(platform === 'win32' ? ';' : ':').map(dir => dir.trim().replace(/^"|"$/g, '')).filter(Boolean).map(dir => path.join(dir, kind + suffix)),
   ];
@@ -65,4 +96,4 @@ function discoverClient(kind, settings = {}, env = process.env, platform = proce
   }
   throw Error(`未找到 ${kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude Code' : 'Kimi Code'} 官方原生客户端，请安装后重新检测，或选择程序位置。`);
 }
-module.exports = { discoverClient, KINDS };
+module.exports = { discoverClient, KINDS, readClientState, rememberClientState };

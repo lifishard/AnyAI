@@ -11,8 +11,11 @@ const path = require('node:path');
 const { app, safeStorage } = require('electron');
 
 let filePath = null;
-let document = null;
-const { createDurableJson } = require('./durable-json.cjs');
+const crypto = require('node:crypto');
+const { createStoreWriter } = require('./store-writer.cjs');
+let cache;
+let cacheFingerprint;
+let writer;
 
 /**
  * 应用改名（SenseNova Chat → AnyAI）会让 app.getPath('userData') 指向新目录，
@@ -78,19 +81,34 @@ function file() {
   return filePath;
 }
 
+function validateStore(value) {
+  if (!value || !value.kv || !value.secrets || Array.isArray(value.kv) || Array.isArray(value.secrets) || typeof value.kv !== 'object' || typeof value.secrets !== 'object') throw new Error('存储结构不兼容');
+}
 function read() {
-  return doc().read();
+  if (cache === undefined) {
+    const target=file();let raw;
+    try{raw=fs.readFileSync(target,'utf8');}
+    catch(error){
+      if(error.code!=='ENOENT')throw error;
+      if(fs.existsSync(target+'.prev'))throw Error('主数据文件缺失，已有备份；请恢复备份后重试。');
+      cache={kv:{},secrets:{}};cacheFingerprint=null;return cache;
+    }
+    const value=JSON.parse(raw);validateStore(value);
+    cache=value;cacheFingerprint=crypto.createHash('sha256').update(raw).digest('hex');
+  }
+  return cache;
 }
-function doc() {
-  if (!document) document = createDurableJson(file(), {
-    initial: () => ({ kv: {}, secrets: {} }),
-    validate(value) {
-      if (!value || !value.kv || !value.secrets || Array.isArray(value.kv) || Array.isArray(value.secrets) || typeof value.kv !== 'object' || typeof value.secrets !== 'object') throw new Error('存储结构不兼容');
-    },
-  });
-  return document;
+function durableWriter() {
+  if (!writer) writer = createStoreWriter(file(),{expectedHash:cacheFingerprint});
+  return writer;
 }
-function flush() { /* Mutations now complete durable writes before returning. */ }
+async function flush() {
+  if (writer) await writer.flush();
+}
+function close() {
+  if (writer) writer.close();
+  writer = undefined;
+}
 
 function encryptionAvailable() {
   try {
@@ -105,8 +123,17 @@ module.exports = {
     const v = read().kv[key];
     return v === undefined ? null : v;
   },
-  kvSet(key, value) {
-    doc().update((data) => { data.kv[key] = value; });
+  async kvSet(key, value) {
+    const current = read();
+    try {
+      await durableWriter().mutate({ scope: 'kv', key, value });
+      if (cache === current) current.kv[key] = value;
+    } catch (error) {
+      // The worker rolls back an uncommitted mutation. Drop the main cache so
+      // a later read can observe a surviving external change or backup.
+      cache = undefined;
+      throw error;
+    }
   },
   secretGet(id) {
     const rec = read().secrets[id];
@@ -120,16 +147,31 @@ module.exports = {
     }
     return rec.v;
   },
-  secretSet(id, value) {
+  async secretSet(id, value) {
     const rec = encryptionAvailable()
       ? { enc: true, v: safeStorage.encryptString(value).toString('base64') }
       : { enc: false, v: value };
-    doc().update((data) => { data.secrets[id] = rec; });
+    const current = read();
+    try {
+      await durableWriter().mutate({ scope: 'secrets', key: id, value: rec });
+      if (cache === current) current.secrets[id] = rec;
+    } catch (error) {
+      cache = undefined;
+      throw error;
+    }
   },
-  secretDelete(id) {
-    doc().update((data) => { delete data.secrets[id]; });
+  async secretDelete(id) {
+    const current = read();
+    try {
+      await durableWriter().mutate({ scope: 'secrets', key: id, delete: true });
+      if (cache === current) delete current.secrets[id];
+    } catch (error) {
+      cache = undefined;
+      throw error;
+    }
   },
   encryptionAvailable,
   flush,
+  close,
   filePath: file,
 };

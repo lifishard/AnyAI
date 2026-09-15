@@ -4,39 +4,76 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 /** Separate durable task records: writing a chat bubble is not a checkpoint. */
-function createRunStore(root) {
+function createRunStore(root, { io = fs } = {}) {
   const hash = (id) => crypto.createHash('sha256').update(String(id)).digest('hex');
   const location = (kind, id) => path.join(root, kind, `${hash(id)}.json`);
+  // A run is written by this process only. Keep the tombstone decision in
+  // memory so streaming checkpoints do not parse the whole run on every
+  // update. The first write still reads both the primary and its backup.
+  const runDisposition = new Map();
   function atomic(file, value) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    io.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp`;
-    const fd = fs.openSync(tmp, 'w', 0o600);
-    try { fs.writeFileSync(fd, JSON.stringify(value)); fs.fsyncSync(fd); }
-    finally { fs.closeSync(fd); }
-    if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.prev`);
-    fs.renameSync(tmp, file);
+    const prev = `${file}.prev`;
+    const fd = io.openSync(tmp, 'w', 0o600);
+    try { io.writeFileSync(fd, JSON.stringify(value)); io.fsyncSync(fd); }
+    finally { io.closeSync(fd); }
+    // Rotate on the same volume instead of copying the complete old record.
+    // If the process stops between the two renames, read() can still recover
+    // the previous committed record from .prev.
+    let rotated = false;
+    try {
+      if (io.existsSync(file)) {
+        try { io.unlinkSync(prev); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+        io.renameSync(file, prev);
+        rotated = true;
+      }
+      io.renameSync(tmp, file);
+    } catch (error) {
+      // Best-effort restoration keeps the primary available when a replace
+      // fails after rotation. The normal reader also accepts .prev alone.
+      if (rotated) {
+        try { if (!io.existsSync(file)) io.renameSync(prev, file); } catch { /* retain .prev for recovery */ }
+      }
+      throw error;
+    } finally {
+      try { io.unlinkSync(tmp); } catch { /* no unfinished temp */ }
+    }
   }
   function read(file) {
     for (const p of [file, `${file}.prev`]) {
-      try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { /* try the last committed record */ }
+      try { return JSON.parse(io.readFileSync(p, 'utf8')); } catch { /* try the last committed record */ }
     }
     return null;
+  }
+  function committedFiles(dir) {
+    if (!io.existsSync(dir)) return [];
+    const names = new Set();
+    for (const name of io.readdirSync(dir)) {
+      if (name.endsWith('.json')) names.add(name);
+      else if (name.endsWith('.json.prev')) names.add(name.slice(0, -'.prev'.length));
+    }
+    return [...names].map((name) => path.join(dir, name));
   }
   return {
     save(record) {
       if (!record?.id || !record.conversationId || !record.answerId || !Array.isArray(record.state?.working)) {
         throw new Error('执行记录不完整，已暂停以避免丢失进度');
       }
-      if (read(location('runs', record.id))?.deleted) return;
-      atomic(location('runs', record.id), record);
+      const runFile = location('runs', record.id);
+      let disposition = runDisposition.get(record.id);
+      if (disposition === undefined) {
+        disposition = read(runFile)?.deleted ? 'deleted' : 'active';
+        runDisposition.set(record.id, disposition);
+      }
+      if (disposition === 'deleted') return;
+      atomic(runFile, record);
     },
     list() {
       const dir = path.join(root, 'runs');
-      if (!fs.existsSync(dir)) return [];
-      return fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
-        .map((f) => read(path.join(dir, f))).filter((r) => r?.id && !r.deleted);
+      return committedFiles(dir).map((file) => read(file)).filter((r) => r?.id && !r.deleted);
     },
-    remove(id) { atomic(location('runs', id), { id, deleted: true }); },
+    remove(id) { atomic(location('runs', id), { id, deleted: true }); runDisposition.set(id, 'deleted'); },
     job(runId, callId) { return read(location('jobs', `${runId}:${callId}`)); },
     saveJob(runId, callId, value) { atomic(location('jobs', `${runId}:${callId}`), value); },
     saveResult(runId, callId, text) {
@@ -58,9 +95,7 @@ function createRunStore(root) {
     },
     exchanges(runId) {
       const dir = path.join(root, 'exchanges');
-      if (!fs.existsSync(dir)) return [];
-      return fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
-        .map((f) => read(path.join(dir, f))).filter((e) => e && (!runId || e.runId === runId))
+      return committedFiles(dir).map((file) => read(file)).filter((e) => e && (!runId || e.runId === runId))
         .sort((a, b) => a.at - b.at).slice(-100);
     },
   };

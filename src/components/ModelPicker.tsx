@@ -3,6 +3,7 @@ import AnchoredPopover from './AnchoredPopover';
 import type { KeyProfile, ModelHealth, ModelHealthMap, ModelHealthStatus, ModelInfo } from '../types';
 import { healthOf, partitionModels } from '../lib/health';
 import { nonChatReason } from '../lib/modelKind';
+import ApiConnectionStatus from './ApiConnectionStatus';
 
 /**
  * 模型 + 凭据选择器，挂在输入框左下角，作用域是**当前会话**。
@@ -238,6 +239,13 @@ export default function ModelPicker(props: {
                 ))
               )}
             </div>
+            <ApiConnectionStatus
+              profile={activeProfile}
+              cachedCount={props.models.length}
+              loading={props.loading}
+              error={props.error}
+              onCheck={props.onRefresh}
+            />
           </div>
 
           {/* 模型 */}
@@ -246,7 +254,7 @@ export default function ModelPicker(props: {
               模型
               <span style={{ flex: 1 }} />
               <span style={{ fontWeight: 400, color: 'var(--fg-faint)' }}>
-                {q.trim() ? `匹配 ${filtered.length} / ${good.length}` : `${good.length} 个可用`}
+                {q.trim() ? `匹配 ${filtered.length} / ${good.length}` : `${good.length} 个模型`}
               </span>
             </div>
 

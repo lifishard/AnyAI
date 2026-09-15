@@ -15,6 +15,7 @@ const http = require('node:http');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { runTool } = require('./tools/index.cjs');
+const { MAX_BATCH, limitLabel } = require('./attachments.cjs');
 
 let server = null;
 let currentPort = 0;
@@ -35,14 +36,19 @@ function newToken() {
   return crypto.randomBytes(18).toString('base64url');
 }
 
-function readBody(req, limit = 8 * 1024 * 1024) {
+// Keep the remote bridge aligned with the attachment batch policy. The
+// endpoint still receives JSON tool requests, but Android/browser clients may
+// carry attachment metadata through the same authenticated bridge.
+const MAX_REMOTE_BODY = MAX_BATCH;
+
+function readBody(req, limit = MAX_REMOTE_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (c) => {
       size += c.length;
       if (size > limit) {
-        reject(new Error('请求体过大'));
+        reject(new Error(`请求体超过 ${limitLabel(limit)} 上限，请分批发送。`));
         req.destroy();
         return;
       }
@@ -153,4 +159,4 @@ function status() {
   };
 }
 
-module.exports = { start, stop, status, newToken };
+module.exports = { start, stop, status, newToken, readBody, MAX_REMOTE_BODY };

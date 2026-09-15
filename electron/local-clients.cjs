@@ -1,7 +1,7 @@
 'use strict';
 const path = require('node:path'), fs = require('node:fs'), crypto = require('node:crypto');
 const { createCodexClient } = require('./codex-client.cjs');
-const { claudeCode, resolveNative } = require('./tools/claudecode.cjs');
+const { claudeCode } = require('./tools/claudecode.cjs');
 
 function createLocalClients({ userData, collaboration, teamFiles, getSettings, openExternal, deps = {} }) {
   const codexFactory = deps.createCodexClient || createCodexClient, runClaude = deps.claudeCode || claudeCode;
@@ -10,11 +10,19 @@ function createLocalClients({ userData, collaboration, teamFiles, getSettings, o
   const text = (value, max = 2000000) => typeof value === 'string' ? value.slice(0, max) : '';
   function binary(kind) {
     const settings = getSettings();
+    const discovery = require('./client-discovery.cjs');
+    const remembered = discovery.readClientState(userData).clients[kind]?.binary || '';
+    let result;
     if (kind === 'codex') {
-      return require('./client-discovery.cjs').discoverClient('codex',settings);
+      result = (deps.discoverClient || discovery.discoverClient)('codex',settings,deps.env || process.env,deps.platform || process.platform,remembered);
+    } else {
+      if (kind !== 'claude') throw Error('未知客户端');
+      result = deps.resolveNative
+        ? deps.resolveNative(settings.tools?.claudeBin, deps.env || process.env, deps.platform || process.platform)
+        : discovery.discoverClient('claude',settings,deps.env || process.env,deps.platform || process.platform,remembered);
     }
-    if (kind !== 'claude') throw Error('未知客户端');
-    return (deps.resolveNative || resolveNative)(settings.tools?.claudeBin, process.env, process.platform);
+    discovery.rememberClientState(userData,kind,{binary:result});
+    return result;
   }
   function find(scope) {
     const data = collaboration.read(), project = data.projects[scope.projectId], run = project?.runs.find(r => r.id === scope.runId);
@@ -69,16 +77,27 @@ function createLocalClients({ userData, collaboration, teamFiles, getSettings, o
   }
   function clearApprovals(job, reason) { for (const entry of [...approvals.values()]) if (entry.job === job) { try { settle(entry, false, reason); } catch { /* already aborted */ } } }
   async function check(kind) {
-    if (kind === 'claude') return { kind, binary: binary(kind), status: 'installed', message: '已找到官方原生客户端；登录与额度由 Claude Code 管理，尚未调用模型。' };
+    const discovery=require('./client-discovery.cjs');
+    if (kind === 'claude') {
+      const command=binary(kind),result={ kind, binary:command, status: 'installed', message: '已找到官方原生客户端；登录与额度由 Claude Code 管理，尚未调用模型。' };
+      discovery.rememberClientState(userData,kind,{binary:command,status:result.status});return result;
+    }
     if (kind !== 'codex') throw Error('未知客户端');
-    const client = codexFactory({ binary: binary(kind), cwd: scratch });
+    const command=binary(kind),client = codexFactory({ binary: command, cwd: scratch });
     try {
       const account = await client.readAccount(), limits = await client.readRateLimits().catch(() => null), models = await client.listModels().catch(() => null);
       const cleanWindow = w => w ? Object.fromEntries(['usedPercent', 'windowDurationMins', 'resetsAt'].filter(k => Number.isFinite(w[k])).map(k => [k, w[k]])) : null;
       const cleanLimit = l => l ? { primary: cleanWindow(l.primary), secondary: cleanWindow(l.secondary) } : null;
-      return { kind, status: 'available', account: { account: account.account ? { type: ['chatgpt', 'apiKey'].includes(account.account.type) ? account.account.type : 'unknown', planType: text(account.account.planType, 80) || null } : null, requiresOpenaiAuth: !!account.requiresOpenaiAuth }, rateLimits: limits ? { rateLimits: cleanLimit(limits.rateLimits), rateLimitsByLimitId: Object.fromEntries(Object.entries(limits.rateLimitsByLimitId || {}).map(([id, value]) => [id, cleanLimit(value)])) } : null, models: models ? { data: (models.data || []).map(m => ({ id: text(m.id, 160), model: text(m.model, 160), displayName: text(m.displayName, 160), defaultReasoningEffort: text(m.defaultReasoningEffort, 40), supportedReasoningEfforts: (m.supportedReasoningEfforts || []).map(e => ({ reasoningEffort: text(e.reasoningEffort, 40), description: text(e.description, 300) })) })), nextCursor: text(models.nextCursor, 500) || null } : null };
+      const result={ kind, status: 'available', account: { account: account.account ? { type: ['chatgpt', 'apiKey'].includes(account.account.type) ? account.account.type : 'unknown', planType: text(account.account.planType, 80) || null } : null, requiresOpenaiAuth: !!account.requiresOpenaiAuth }, rateLimits: limits ? { rateLimits: cleanLimit(limits.rateLimits), rateLimitsByLimitId: Object.fromEntries(Object.entries(limits.rateLimitsByLimitId || {}).map(([id, value]) => [id, cleanLimit(value)])) } : null, models: models ? { data: (models.data || []).map(m => ({ id: text(m.id, 160), model: text(m.model, 160), displayName: text(m.displayName, 160), defaultReasoningEffort: text(m.defaultReasoningEffort, 40), supportedReasoningEfforts: (m.supportedReasoningEfforts || []).map(e => ({ reasoningEffort: text(e.reasoningEffort, 40), description: text(e.description, 300) })) })), nextCursor: text(models.nextCursor, 500) || null } : null };
+      discovery.rememberClientState(userData,kind,{binary:command,status:result.status});return result;
     } catch { throw Error('无法读取官方客户端连接状态，请在官方客户端检查登录。'); }
     finally { client.close(); }
+  }
+  async function restore() {
+    const saved=require('./client-discovery.cjs').readClientState(userData).clients;
+    const kinds=['codex','claude'].filter(kind=>saved[kind]?.binary && ['ready','available','installed','waiting_login'].includes(saved[kind]?.status));
+    const settled=await Promise.allSettled(kinds.map(check));
+    return settled.map((result,index)=>result.status==='fulfilled'?result.value:{kind:kinds[index],status:'error',message:'重启后连接检查失败，请手动重新检测。'});
   }
   async function login() {
     loginClients.get('codex')?.close(); const client = codexFactory({ binary: binary('codex'), cwd: scratch }); loginClients.set('codex', client);
@@ -177,6 +196,6 @@ function createLocalClients({ userData, collaboration, teamFiles, getSettings, o
       promote(current); event(current, 'permission', { text: '上次本机客户端审批已过期；不会复用批准。' }, scope);
     });
   }
-  return { check, login, run, approve, abort, busy: () => active.size, close() { for (const job of active.values()) job.controller.abort(); for (const client of loginClients.values()) client.close(); loginClients.clear(); } };
+  return { check, restore, login, run, approve, abort, busy: () => active.size, close() { for (const job of active.values()) job.controller.abort(); for (const client of loginClients.values()) client.close(); loginClients.clear(); } };
 }
 module.exports = { createLocalClients };

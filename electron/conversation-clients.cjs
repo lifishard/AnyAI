@@ -2,7 +2,7 @@
 const fs = require('node:fs'), path = require('node:path');
 const { spawn } = require('node:child_process');
 const {randomUUID}=require('node:crypto');
-const { discoverClient, KINDS } = require('./client-discovery.cjs');
+const { discoverClient, KINDS, readClientState, rememberClientState } = require('./client-discovery.cjs');
 const { createCodexClient, subscriptionEnvironment } = require('./codex-client.cjs');
 const { claudeCode } = require('./tools/claudecode.cjs');
 const { readClaudeConnection, describeConnection } = require('./claude-connection.cjs');
@@ -41,7 +41,13 @@ function validateKimiWorkPermission(event, root) {
 function createConversationClients({ userData, getSettings, store, openExternal, deps = {} }) {
   const scratch = path.join(userData, 'conversation-clients'); fs.mkdirSync(scratch, { recursive:true });
   const active = new Map(), logins = new Map(), approvals=new Map();
-  const discover = kind => (deps.discoverClient || discoverClient)(kind, getSettings());
+  const discover = kind => {
+    const remembered=readClientState(userData).clients[kind]?.binary || '';
+    const binary=(deps.discoverClient || discoverClient)(kind,getSettings(),deps.env || process.env,deps.platform || process.platform,remembered);
+    rememberClientState(userData,kind,{binary});
+    return binary;
+  };
+  const rememberedResult=(kind,binary,result)=>{rememberClientState(userData,kind,{binary,status:result.status});return result;};
   const codex = (binary,options={}) => (deps.createCodexClient || createCodexClient)({binary, cwd:scratch,...options});
   const acp = binary => (deps.createAcpClient || require('./acp-client.cjs').createAcpClient)({binary, cwd:scratch});
   const cleanModels = data => (data || []).slice(0,500).filter(m => typeof (m.model || m.id) === 'string').map(m => ({id:(m.model || m.id).slice(0,160),label:String(m.displayName || m.name || m.model || m.id).slice(0,160),efforts:(m.supportedReasoningEfforts || []).map(e=>e.reasoningEffort).filter(e=>typeof e==='string').slice(0,12),defaultEffort:m.defaultReasoningEffort}));
@@ -52,27 +58,27 @@ function createConversationClients({ userData, getSettings, store, openExternal,
     try {
       if (kind === 'codex') {
         client = codex(binary); const account = await client.readAccount();
-        if (account.account?.type !== 'chatgpt') return {kind,binary,status:'login_required',models:[],message:'连接官方 ChatGPT 账号后即可选择订阅提供的模型。'};
+        if (account.account?.type !== 'chatgpt') return rememberedResult(kind,binary,{kind,binary,status:'login_required',models:[],message:'连接官方 ChatGPT 账号后即可选择订阅提供的模型。'});
         let all=[], cursor; const seen = new Set();
         do { const page=await client.listModels({cursor}); all.push(...(page.data||[])); cursor=page.nextCursor; if(seen.has(cursor))break;seen.add(cursor); } while(cursor && all.length<500);
-        return {kind,binary,status:'ready',message:'已连接官方 ChatGPT 账号，模型列表来自本机 Codex。',models:cleanModels(all)};
+        return rememberedResult(kind,binary,{kind,binary,status:'ready',message:'已连接官方 ChatGPT 账号，模型列表来自本机 Codex。',models:cleanModels(all)});
       }
       if (kind === 'claude') {
         (deps.validateClaudeBinary || require('./claude-program.cjs').assertClaudeCodeBinary)(binary);
         const connection=(deps.readClaudeConnection || readClaudeConnection)();
         const connectionInfo=describeConnection(connection);
         const gateway=await deps.claudeGatewayCheck?.();
-        if(gateway && gateway.state!=='ready') return {kind,binary,status:'error',connection:connectionInfo,models:[],message:`Claude Code 配置的本机服务需要检查。${gateway.message}`};
+        if(gateway && gateway.state!=='ready') return rememberedResult(kind,binary,{kind,binary,status:'error',connection:connectionInfo,models:[],message:`Claude Code 配置的本机服务需要检查。${gateway.message}`});
         const loggedIn = await new Promise(resolve => {
           const child=(deps.spawn || spawn)(binary,['--setting-sources','','--settings','{"disableAllHooks":true}','auth','status'],{cwd:scratch,env:{...subscriptionEnvironment(),...connection.env},shell:false,windowsHide:true,stdio:['ignore','ignore','ignore']});
           const timer=setTimeout(()=>{child.kill();resolve(false);},15000);
           child.on('error',()=>{clearTimeout(timer);resolve(false);});child.on('close',code=>{clearTimeout(timer);resolve(code===0);});
         });
         const source=connectionInfo.type==='custom_api'?`自定义 API：${connection.baseUrl}`:connectionInfo.type==='api_key'?'API 凭据':'Claude 账号登录';
-        return {kind,binary,status:loggedIn?'ready':'login_required',connection:connectionInfo,message:loggedIn?`Claude Code CLI 已就绪。连接来源：${source}。${gateway?'已配置的本机网关已响应。':''}尚未发送模型请求；可用模型以你的服务配置为准。`:'Claude Code 授权未通过检查，请检查现有账号或 API 配置后重新检测。',models:loggedIn?[{id:'default',label:'Claude Code 配置的默认模型',efforts:[]},...['sonnet','opus','haiku'].map(id=>({id,label:`${id} · 配置别名${connection.env['ANTHROPIC_DEFAULT_'+id.toUpperCase()+'_MODEL']?' → '+connection.env['ANTHROPIC_DEFAULT_'+id.toUpperCase()+'_MODEL']:''}`,efforts:id==='haiku'?[]:['low','medium','high','xhigh','max']}))]:[]};
+        return rememberedResult(kind,binary,{kind,binary,status:loggedIn?'ready':'login_required',connection:connectionInfo,message:loggedIn?`Claude Code CLI 已就绪。连接来源：${source}。${gateway?'已配置的本机网关已响应。':''}尚未发送模型请求；可用模型以你的服务配置为准。`:'Claude Code 授权未通过检查，请检查现有账号或 API 配置后重新检测。',models:loggedIn?[{id:'default',label:'Claude Code 配置的默认模型',efforts:[]},...['sonnet','opus','haiku'].map(id=>({id,label:`${id} · 配置别名${connection.env['ANTHROPIC_DEFAULT_'+id.toUpperCase()+'_MODEL']?' → '+connection.env['ANTHROPIC_DEFAULT_'+id.toUpperCase()+'_MODEL']:''}`,efforts:id==='haiku'?[]:['low','medium','high','xhigh','max']}))]:[]});
       }
       client=acp(binary); const info=await client.inspect();
-      return {kind,binary,status:'ready',message:'已连接 Kimi ACP；执行范围受客户端能力与授权限制。',models:info.models?.length?info.models.map(m=>({id:m.id,label:m.name || m.id,efforts:(info.efforts || []).map(e=>e.id),defaultEffort:info.current?.effort || undefined})):[{id:'default',label:'官方客户端默认模型',efforts:[]}],capabilities:info.capabilities};
+      return rememberedResult(kind,binary,{kind,binary,status:'ready',message:'已连接 Kimi ACP；执行范围受客户端能力与授权限制。',models:info.models?.length?info.models.map(m=>({id:m.id,label:m.name || m.id,efforts:(info.efforts || []).map(e=>e.id),defaultEffort:info.current?.effort || undefined})):[{id:'default',label:'官方客户端默认模型',efforts:[]}],capabilities:info.capabilities});
     } catch(error) {
       if(kind==='kimi' && error?.authRequired) return {kind,binary,status:'login_required',models:[],message:'Kimi ACP 要求登录；请先在官方客户端运行 kimi login，再重新检测。'};
       return {kind,binary,status:'error',models:[],message:'客户端未完成连接，请检查官方客户端版本、登录或网络后重新检测。'};
@@ -89,8 +95,15 @@ function createConversationClients({ userData, getSettings, store, openExternal,
       if(url.protocol!=='https:' || !['auth.openai.com','auth.chatgpt.com','chatgpt.com'].includes(url.hostname) || url.username || url.password)throw Error('无效登录地址');
       await openExternal(url.href);
       const timer=setTimeout(()=>{if(logins.get(kind)===client){client.close();logins.delete(kind);}},10*60*1000);timer.unref?.();
-      return {kind,status:'waiting_login',models:[],message:'已打开官方登录页面，完成登录后点击重新检测。'};
+      const result={kind,status:'waiting_login',models:[],message:'已打开官方登录页面，完成登录后点击重新检测。'};
+      rememberClientState(userData,kind,{binary:discover(kind),status:result.status});return result;
     } catch {client.close();logins.delete(kind);throw Error('无法发起官方登录，请检查 Codex 客户端。');}
+  }
+  async function restore() {
+    const saved=readClientState(userData).clients;
+    const kinds=KINDS.filter(kind=>saved[kind]?.binary && ['ready','waiting_login','available','installed'].includes(saved[kind]?.status));
+    const settled=await Promise.allSettled(kinds.map(check));
+    return settled.map((result,index)=>result.status==='fulfilled'?result.value:{kind:kinds[index],status:'error',models:[],message:'重启后连接检查失败，请手动重新检测。'});
   }
   async function run(args={},notify=()=>{}) {
     if(!/^[\w-]{1,160}$/.test(args.requestId || '') || !/^[\w-]{1,160}$/.test(args.runId || ''))throw Error('执行编号无效');
@@ -167,6 +180,6 @@ function createConversationClients({ userData, getSettings, store, openExternal,
       store.saveJob(args.runId,jobId,{status:result.status,result,at:Date.now(),kind:selection.kind,cwd});return result;
     }finally{controller.abort();job.client?.close();active.delete(args.runId);}
   }
-  return {check,connect,run,async repairClaude(){ try { const binary=discover('claude');(deps.validateClaudeBinary || require('./claude-program.cjs').assertClaudeCodeBinary)(binary); const recovery=await deps.repairClaudeGateway?.(); if(recovery && recovery.state!=='ready') return {kind:'claude',status:'error',models:[],message:recovery.message}; return await check('claude'); } catch { return {kind:'claude',status:'error',models:[],message:'Claude 恢复检查失败，请核对程序路径和用户路由配置。'}; } },recover(runId,callId){if(!/^native-[\w-]{1,160}$/.test(callId || '')||!store.list().some(r=>r.id===runId))throw Error('执行记录无效');const saved=store.job(runId,callId);return saved?.result || (saved?{status:'unknown',text:saved.partial || '',error:'先前操作未留下可靠的完成记录，请核实后再继续。'}:null);},approve(requestId,id,approved){const entry=approvals.get(id);if(!entry||entry.requestId!==requestId)throw Error('此操作已结束或授权已过期');entry.finish(approved===true);},abort:id=>active.get(id)?.controller.abort(),busy:()=>active.size>0,close(){for(const job of active.values())job.controller.abort();for(const client of logins.values())client.close();logins.clear();}};
+  return {check,connect,restore,run,async repairClaude(){ try { const binary=discover('claude');(deps.validateClaudeBinary || require('./claude-program.cjs').assertClaudeCodeBinary)(binary); const recovery=await deps.repairClaudeGateway?.(); if(recovery && recovery.state!=='ready') return {kind:'claude',status:'error',models:[],message:recovery.message}; return await check('claude'); } catch { return {kind:'claude',status:'error',models:[],message:'Claude 恢复检查失败，请核对程序路径和用户路由配置。'}; } },recover(runId,callId){if(!/^native-[\w-]{1,160}$/.test(callId || '')||!store.list().some(r=>r.id===runId))throw Error('执行记录无效');const saved=store.job(runId,callId);return saved?.result || (saved?{status:'unknown',text:saved.partial || '',error:'先前操作未留下可靠的完成记录，请核实后再继续。'}:null);},approve(requestId,id,approved){const entry=approvals.get(id);if(!entry||entry.requestId!==requestId)throw Error('此操作已结束或授权已过期');entry.finish(approved===true);},abort:id=>active.get(id)?.controller.abort(),busy:()=>active.size>0,close(){for(const job of active.values())job.controller.abort();for(const client of logins.values())client.close();logins.clear();}};
 }
 module.exports={createConversationClients};

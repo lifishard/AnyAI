@@ -13,6 +13,7 @@ import TaskFeedback from './TaskFeedback';
 import UserQuestionCard from './UserQuestionCard';
 import GatewayRecovery from './GatewayRecovery';
 import ClaudeRepair from './ClaudeRepair';
+import SubagentProgress from './SubagentProgress';
 import type { KeyProfile } from '../types';
 import type { GatewayRecoveryResult } from '../lib/gateway-recovery';
 
@@ -355,6 +356,8 @@ export default function AnswerBlock(props: {
       ) : null}
 
       {answer?.notice ? <div className="answer-notice">{answer.notice}</div> : null}
+      {answer?.subagents?.length ? <SubagentProgress jobs={answer.subagents}/> : null}
+      {answer?.harness?.review ? <details className="task-review"><summary>完成自查 · 模型复核</summary><p>{answer.harness.review.summary}</p><p>{answer.harness.review.checks}</p>{answer.harness.review.nextAction?<p>可选下一步：{answer.harness.review.nextAction}</p>:null}</details>:null}
       {answer?.supplementalInputs?.length ? <details className="delivery-panel"><summary>已补充的信息 · {answer.supplementalInputs.length} 条</summary>{answer.supplementalInputs.map(m=><blockquote key={m.id}>{m.content}</blockquote>)}</details>:null}
 
       {answer?.userQuestionHistory?.map((item) => (

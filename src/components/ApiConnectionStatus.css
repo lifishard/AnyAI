@@ -1,0 +1,33 @@
+.api-connection-status {
+  display: grid;
+  gap: 5px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+
+.api-connection-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.api-connection-status p {
+  margin: 0;
+  color: var(--fg-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.connection-state.checking > span {
+  background: var(--accent);
+}
+
+.connection-state.error {
+  color: var(--danger-fg, #b91c1c);
+}
+
+.connection-state.error > span {
+  background: currentColor;
+}

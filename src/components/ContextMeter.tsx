@@ -29,6 +29,9 @@ export default function ContextMeter({ preview, draft }: { preview: ContextPrevi
   const deferredDraft = React.useDeferredValue(draft);
   const result = React.useMemo(() => {
     if (preview.current) return { value: preview.current };
+    // Building the exact request expands archived runs. Do this only when the
+    // user opens the detail panel, never on every streamed token or keystroke.
+    if (!open) return {};
     try {
       const cap = capabilities(preview.profile,preview.config,preview.learned,preview.modelInfo);
       const tools = preview.config.toolsEnabled ? [...new Set([...preview.toolNames,'read_context', 'read_tool_result', ...(preview.config.runtime?.milestones === false ? [] : ['update_plan','update_requirements','verify_requirements'])])] : [];
@@ -38,7 +41,7 @@ export default function ContextMeter({ preview, draft }: { preview: ContextPrevi
       const body = prepareBody(buildRequestBody(preview.config,buildWire(memory.history,preview.config,extra),tools,preview.mappings),preview.config,cap);
       return { value:snapshot(body,preview.config,preview.profile,cap) };
     } catch (e) { return { error:e instanceof Error ? e.message : String(e) }; }
-  },[preview,deferredDraft]);
+  },[open,preview,deferredDraft]);
   const s = result.value;
   const ratio = s?.contextWindow ? Math.min(100,s.inputTokens/s.contextWindow*100) : 0;
   const reserved = s?.contextWindow ? Math.min(100,ratio+s.outputReserve/s.contextWindow*100) : 0;
@@ -48,7 +51,7 @@ export default function ContextMeter({ preview, draft }: { preview: ContextPrevi
       <span className="context-ring" style={{ background: `conic-gradient(var(--accent) ${ratio}%, var(--border-strong) ${ratio}% ${reserved}%, var(--bg-sunken) ${reserved}% 100%)` }}>
         <span>{s?.contextWindow ? `${Math.round(ratio)}%` : '?'}</span>
       </span>
-      <span className="context-meter-label">{s ? n(s.inputTokens) : '配置待核对'}</span>
+      <span className="context-meter-label">{s ? n(s.inputTokens) : '查看用量'}</span>
     </button>
     {open ? <AnchoredPopover anchorRef={anchorRef} onClose={() => setOpen(false)} className="context-popover" label="上下文用量与预算" align="end">
       <strong>上下文 · {phase}</strong>

@@ -17,6 +17,7 @@ export interface TaskObservation {
   tools:{total:number;ok:number;failed:number;denied:number;elapsedMs:number};
   compactions:{total:number;latestBeforeTokens:number|null;latestAfterTokens:number|null};
   requirementStates:Record<string,string>;
+  harness?:{mode:string;continuations:number;completion:string;foldedMessages:number;subagents:number;subagentsCompleted:number};
   pauseCount:number;resumeCount:number;pauseReasons:Record<string,number>;supplements:number;recoveredWrites:number;missing:string[];
 }
 export interface ObservationStore {version:1;epoch:string;createdAt:number;tasks:TaskObservation[];droppedTasks:number;writeFailures:number;lastError?:string;clearedAt?:number;ignoredRecordIds:string[]}
@@ -91,6 +92,10 @@ export function projectObservation(previous:TaskObservation|undefined,record:Run
     event(t,`state:${stageSource}:${t.nextSeq+1}`,'state_changed',at,attempt.id,{from:t.status,to:attempt.status,reason,errorKind:s.errorInfo?.kind??'none'});
   }
   t.status=attempt.status;t.lastAt=at;t.appVersion=appVersion;t.runtimeVersion=s.runtimeVersion ?? 'unknown';
+  if(s.harness){
+    t.harness={mode:s.harness.mode,continuations:s.harness.continuations,completion:s.harness.completion?.status??'unchecked',foldedMessages:s.harness.context?.foldedMessages??0,subagents:s.subagents?.length??0,subagentsCompleted:s.subagents?.filter(j=>j.status==='completed').length??0};
+    event(t,`harness:${stageSource}:${s.harness.continuations}`,'completion_guard',s.harness.completion?.at??at,attempt.id,{mode:s.harness.mode,continuations:s.harness.continuations,status:s.harness.completion?.status??'unchecked',foldedMessages:t.harness.foldedMessages,subagents:t.harness.subagents});
+  }
   if(s.handoff)event(t,`handoff:${stageSource}`,'context_handoff',s.handoff.at,attempt.id,{
     mode:s.handoff.mode,status:s.handoff.status,modelChanged:Boolean(s.handoff.fromModel&&s.handoff.fromModel!==s.handoff.toModel),
     sourceMessages:s.handoff.sourceMessages,savedSteps:s.handoff.savedSteps,checkpoints:s.handoff.checkpoints,summaryAvailable:s.handoff.summaryAvailable,

@@ -2,6 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {createConversationClients}=require('../electron/conversation-clients.cjs');
 const {createRunStore}=require('../electron/run-store.cjs');
+const {rememberClientState}=require('../electron/client-discovery.cjs');
 function fixture(t, overrides={}){
   const root=fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()),'wickrun-clients-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const store=createRunStore(path.join(root,'runtime')),calls=[],opened=[];
@@ -11,6 +12,18 @@ function fixture(t, overrides={}){
 }
 test('official models and login are discovered without any renderer credential',async t=>{
   const f=fixture(t);const result=await f.host.check('codex');assert.equal(result.status,'ready');assert.deepEqual(result.models[0].efforts,['high']);assert.equal((await f.host.connect('codex')).status,'ready');assert.equal(f.opened.length,0);
+});
+
+test('restart restores a previously validated native client path and rechecks its account',async t=>{
+  const root=fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()),'wickrun-client-restart-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const binary=path.join(root,'saved','codex.exe');fs.mkdirSync(path.dirname(binary),{recursive:true});fs.writeFileSync(binary,'fixture');
+  assert.equal(rememberClientState(root,'codex',{binary,status:'ready'}),true);
+  let checks=0;
+  const host=createConversationClients({userData:root,store:createRunStore(path.join(root,'runtime')),getSettings:()=>({}),openExternal:async()=>{},deps:{env:{USERPROFILE:root,LOCALAPPDATA:path.join(root,'none'),APPDATA:path.join(root,'none'),PATH:''},platform:'win32',createCodexClient:options=>{
+    assert.equal(options.binary,fs.realpathSync(binary));checks++;
+    return {readAccount:async()=>({account:{type:'chatgpt'}}),listModels:async()=>({data:[{model:'restored-model'}]}),close(){}};
+  }}});t.after(()=>host.close());
+  const restored=await host.restore();assert.equal(restored[0].status,'ready');assert.equal(checks,1);
 });
 
 test('Claude Code reports account, API key and custom API sources without assuming OmniRoute',async t=>{

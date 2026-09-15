@@ -3,9 +3,12 @@ import {desktop} from './transport';
 import type {RunState} from '../types';
 import type {ClientTurnResult} from './connections';
 import {formatUserAnswers,parseUserQuestions,validateUserAnswers} from './user-questions';
+import {taskSeed,harnessInstructions,planOnly,completionBlocker} from './harness';
+import {runDesktopConversation} from './desktop-conversation';
 
 /** Native adapters receive a portable transcript; vendor session IDs are evidence, not the sole memory. */
 export function runConnectedAgent(args:RunAgentArgs):AgentHandle {
+  if(args.config.client?.kind==='claude-desktop')return runDesktopConversation(args);
   if(!args.config.client){
     const pending=args.resume?.userQuestion;
     if(pending?.callId.startsWith('native-question-')){
@@ -27,6 +30,7 @@ export function runConnectedAgent(args:RunAgentArgs):AgentHandle {
     version:2,runId:args.resume?.runId || args.requestId,at:Date.now(),round:args.resume?.round || 1,stoppedBy:'unknown',status:'running',
     content:args.resume?.content || '',lastModel:args.config.model,attemptId:args.requestId,phase:'request',steps:args.resume?.steps || [],sources:args.resume?.sources || []};
   const save=async()=>{state.at=Date.now();await events.onRunState(structuredClone(state));};
+  state.harness=taskSeed(state.working,args.config,state.harness);
   void (async()=>{
     try{
       if(!bridge)throw Error('本机连接需要使用桌面版。');
@@ -80,7 +84,7 @@ export function runConnectedAgent(args:RunAgentArgs):AgentHandle {
           void save().then(()=>args.confirm(step)).then(approved=>bridge.conversationClientApprove(args.requestId,id,approved && !cancelled)).catch(()=>bridge.conversationClientApprove(args.requestId,id,false).catch(()=>{})).finally(()=>{if(!cancelled){state.status='running';state.waitKind=undefined;events.onNotice('正在等待官方客户端返回结果…');}});
         }
       });
-      const context=buildWire(state.working,{...args.config,toolsEnabled:false,historyLimit:0},args.extraSystem);
+      const context=buildWire(state.working,{...args.config,toolsEnabled:false,historyLimit:0},args.extraSystem+harnessInstructions(args.config,state));
       const prompt=`You are continuing the user's conversation inside wickrunAI. The following JSON is the conversation transcript, with role labels and attached text. Answer the most recent user request while preserving earlier requirements. Do not repeat completed operations from prior turns. ${args.config.toolsEnabled?'Work only within the authorized working directory. Report output paths and unresolved requirements.':'This is Chat mode: discuss only. Do not execute commands or change files.'}
 
 If you need a blocking answer from the user before you can continue, emit exactly one <wickrun_question> marker containing JSON in this schema: {"questions":[{"id":"stable-id","header":"short optional heading","question":"question text","options":[{"label":"choice","description":"optional explanation"}],"multiple":false}]}. Include 1 to 3 questions, at most 6 options per question, and use an empty options array for a free-text question. Do not put markdown around the marker. You may put a short user-visible explanation before or after it. Never use this marker unless the turn has completed successfully.
@@ -111,6 +115,11 @@ ${JSON.stringify(context)}`;
       if(result.text){state.content=result.text;events.onContentReplace?.(result.text,'');}
       if(result.status!=='unknown')state.uncertainCallId=undefined;
       if(result.status!=='completed')throw Error(result.error || `官方客户端已暂停（${result.status}），已有内容已保留。`);
+      const blocker=completionBlocker(state,result.text,args.config);if(blocker)throw Error(blocker);
+      if(state.harness?.action&&planOnly(result.text)){
+        state.harness.completion={status:'needs_work',reason:'本机客户端仅返回了计划，尚未确认完成。',evidence:[],at:Date.now()};
+        throw Error('本机客户端只返回了下一步计划，任务尚未完成。请继续本轮以核实进度；应用没有自动重发可能已执行的本机操作。');
+      }
       state.working.push({id:args.requestId+'-answer',role:'assistant',content:result.text,createdAt:Date.now()});
       state.status='completed';state.reason=undefined;state.pendingCalls=undefined;state.toolCursor=undefined;
       await save();await events.onRunState(null);events.onNotice('');events.onDone();

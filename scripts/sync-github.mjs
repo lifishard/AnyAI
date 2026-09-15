@@ -32,7 +32,10 @@ try {
   const candidates = git(['ls-files','-co','--exclude-standard','-z']).split('\0').filter(Boolean);
   const hits = scanWorkingFiles(root,candidates);
   if (hits.length) throw new Error('发现疑似密钥（未改动暂存区）：\n'+hits.slice(0,20).map(h=>`  ${h.file}:${h.line} — ${h.kind}（内容隐藏）`).join('\n'));
-  if(args.includes('--release'))execFileSync(process.execPath,['--test',...fs.readdirSync(path.join(root,'tests')).filter(n=>n.endsWith('.test.cjs')).map(n=>path.join('tests',n))],{cwd:root,stdio:'inherit'});
+  const testFiles = fs.readdirSync(path.join(root,'tests'))
+    .filter(n=>n.endsWith('.test.cjs'))
+    .map(n=>path.join('tests',n));
+  execFileSync(process.execPath,['--test',...testFiles],{cwd:root,stdio:'inherit'});
   if (checkOnly) console.log('✓ 推送前检查通过；未暂存、提交或推送。');
   else {
     git(['remote','get-url','origin']);

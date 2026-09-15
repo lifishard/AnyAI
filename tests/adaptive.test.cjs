@@ -231,7 +231,8 @@ test('Chat to Work keeps decisions, attachments and saved context while enabling
     const wire=JSON.stringify(init.body.messages);
     for(const text of ['名称保留灯芯AI','仅向已报名用户发布','发布时间为周五','按上面的方案检查资料'])assert.ok(wire.includes(text),text);
     assert.ok(init.body.tools.some(t=>t.function.name==='read_file'));
-    response(e,'已按已有方案继续处理。');
+    if(!init.body.messages.some(m=>m.role==='tool')) response(e,'',[{id:'check-brief',name:'read_file',arguments:'{"path":"C:/QA/brief.txt"}'}]);
+    else response(e,'已按已有方案继续处理。');
   },{history,conversationMemory:relay.conversationMemory(history,()=>record),config:{...chatConfig,toolsEnabled:true}});
   await work.finished;assert.equal(work.log.done,1);
   assert.equal(work.log.states.at(-1).handoff.mode,'followup');

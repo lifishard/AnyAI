@@ -8,8 +8,11 @@ function createDurableJson(file, { initial, validate = () => {}, io = fs } = {})
   let cache;
   let loadedHash;
   const hash=text=>crypto.createHash('sha256').update(text).digest('hex');
-  function read() {
-    if (cache !== undefined) return structuredClone(cache);
+  // Load the owned in-memory value without cloning. Public reads still return
+  // a clone, while writers can validate the current disk hash without copying
+  // a large document before every update.
+  function load() {
+    if (cache !== undefined) return cache;
     let raw;
     try { raw = io.readFileSync(file, 'utf8'); }
     catch (error) {
@@ -23,13 +26,16 @@ function createDurableJson(file, { initial, validate = () => {}, io = fs } = {})
     catch (error) { throw new Error(`数据读取失败，原文件已保留：${file} (${error.message})`); }
     cache = value;
     loadedHash = hash(raw);
-    return structuredClone(cache);
+    return cache;
+  }
+  function read() {
+    return structuredClone(load());
   }
   function write(value) {
     validate(value);
     const text = JSON.stringify(value);
     // Validate the current disk data before replacing it, including on a first write.
-    read();
+    load();
     if (cache !== undefined) {
       let current;
       try { current = hash(io.readFileSync(file, 'utf8')); } catch (error) { cache = undefined; loadedHash = undefined; throw error; }
@@ -42,11 +48,11 @@ function createDurableJson(file, { initial, validate = () => {}, io = fs } = {})
       fd = io.openSync(tmp, 'wx', 0o600);
       io.writeFileSync(fd, text, 'utf8'); io.fsyncSync(fd); io.closeSync(fd); fd = undefined;
       if (io.existsSync(file)) {
-        const prevTmp = tmp + '.prev';
-        io.copyFileSync(file, prevTmp);
-        const backupFd = io.openSync(prevTmp, 'r+');
-        try { io.fsyncSync(backupFd); } finally { io.closeSync(backupFd); }
-        io.renameSync(prevTmp, file + '.prev');
+        const prevTmp=tmp+'.prev';
+        io.copyFileSync(file,prevTmp);
+        const backupFd=io.openSync(prevTmp,'r+');
+        try{io.fsyncSync(backupFd);}finally{io.closeSync(backupFd);}
+        io.renameSync(prevTmp,file+'.prev');
       }
       io.renameSync(tmp, file);
       cache = JSON.parse(text);
@@ -59,6 +65,7 @@ function createDurableJson(file, { initial, validate = () => {}, io = fs } = {})
     return structuredClone(cache);
   }
   return { read, write, update(fn) { const value = read(); fn(value); return write(value); },
+    currentHash() { return loadedHash; },
     invalidate() { cache = undefined; loadedHash = undefined; }, file };
 }
 module.exports = { createDurableJson };

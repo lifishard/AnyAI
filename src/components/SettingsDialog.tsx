@@ -1,5 +1,4 @@
 import React from 'react';
-import LocalClientsPanel from './collaboration/LocalClientsPanel';
 import type { AppSettings, KeyProfile, SearchProvider } from '../types';
 import { BASE_URL_PRESETS, normalizeBaseUrl } from '../lib/api';
 import { secretDelete, secretGet, secretSet, uid } from '../lib/store';
@@ -547,22 +546,6 @@ export default function SettingsDialog(props: {
           ＋ 添加一份凭据
         </button>
 
-        <div className="card" style={{ marginTop: 14 }}>
-          <div className="section-title" style={{ marginTop: 0 }}>关于上下文缓存</div>
-          <div className="hint" style={{ lineHeight: 1.85 }}>
-            Kimi / Moonshot 的上下文缓存现在是<strong>全自动的</strong> —— 没有要调的接口、没有要发的
-            header、也没有缓存对象要创建。超过 256 token 的请求，重复的前缀会自动命中。
-            <br />
-            <br />
-            所以省 token 这件事上，客户端能做的只有一件：<strong>别把前缀搞乱</strong>。缓存是按前缀逐字节
-            匹配的，这个应用为此做了两件事 —— 工具清单下发前排序（否则你勾一下工具，序列化结果变了，
-            整段前缀就失配），以及只往历史后面追加、不改写前面的内容。
-            <br />
-            <br />
-            有两个操作会主动破坏前缀，用的时候心里有数就行：把「携带历史条数」从 0 改成有限值（会从
-            头部截断），以及超长对话触发的旧工具输出压缩。命中了多少会显示在每条回答下面。
-          </div>
-        </div>
       </div>
     );
   }
@@ -933,7 +916,7 @@ export default function SettingsDialog(props: {
         ))}
       </div>
       <div className="modal-body">
-        {tab === 'keys' ? <>{KeysTab()}<LocalClientsPanel settings={s} onChange={props.onChange}/></> : null}
+        {tab === 'keys' ? KeysTab() : null}
         {tab === 'tools' ? ToolsTab() : null}
         {tab === 'effort' ? EffortTab() : null}
         {tab === 'remote' ? <RemoteTab settings={s} onChange={props.onChange} /> : null}

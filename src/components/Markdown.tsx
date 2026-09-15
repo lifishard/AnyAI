@@ -43,13 +43,14 @@ function render(md: string, sources: SourceRef[]): string {
   });
 }
 
+const EMPTY_SOURCES: SourceRef[] = [];
 export default function Markdown(props: {
   text: string;
   sources?: SourceRef[];
   onCiteClick?: (n: number) => void;
 }) {
   const ref = React.useRef<HTMLDivElement>(null);
-  const sources = props.sources ?? [];
+  const sources = props.sources ?? EMPTY_SOURCES;
   const html = React.useMemo(() => render(props.text, sources), [props.text, sources]);
 
   React.useEffect(() => {

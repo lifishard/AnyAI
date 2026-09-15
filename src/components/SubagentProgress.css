@@ -1,0 +1,92 @@
+.subagent-progress {
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-elev);
+}
+
+.subagent-progress > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 11px;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.subagent-progress-list {
+  border-top: 1px solid var(--border);
+}
+
+.subagent-progress article {
+  padding: 9px 11px;
+}
+
+.subagent-progress article + article {
+  border-top: 1px solid var(--border);
+}
+
+.subagent-progress header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+}
+
+.subagent-progress header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.subagent-status > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+}
+
+.subagent-status.running,
+.subagent-status.queued {
+  color: var(--accent);
+}
+
+.subagent-status.completed {
+  color: var(--ok-fg, #15803d);
+}
+
+.subagent-status.failed,
+.subagent-status.uncertain {
+  color: var(--danger-fg, #b91c1c);
+}
+
+.subagent-status.running > span,
+.subagent-status.queued > span,
+.subagent-status.completed > span,
+.subagent-status.failed > span,
+.subagent-status.uncertain > span {
+  background: currentColor;
+}
+
+.subagent-progress article p {
+  margin: 6px 0 0;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}

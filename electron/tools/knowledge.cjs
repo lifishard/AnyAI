@@ -24,7 +24,7 @@ function readList(key) {
 }
 
 function writeList(key, list) {
-  store.kvSet(key, JSON.stringify(list));
+  return store.kvSet(key, JSON.stringify(list));
 }
 
 function currentProject(ctx) {
@@ -45,7 +45,7 @@ function projectMemoryRead(_args, ctx) {
   return ok(p.memory, { summary: `读项目记忆（${p.memory.length} 字）` });
 }
 
-function projectMemoryWrite(args, ctx) {
+async function projectMemoryWrite(args, ctx) {
   const p = currentProject(ctx);
   if (!p) return fail(NO_PROJECT);
 
@@ -66,7 +66,7 @@ function projectMemoryWrite(args, ctx) {
   // 别让记忆无限膨胀 —— 每轮都要拼进 system prompt
   const MAX = 20000;
   list[i].memory = next.length > MAX ? `…（较早的记忆已截断）\n${next.slice(-MAX)}` : next;
-  writeList(K_PROJECTS, list);
+  await writeList(K_PROJECTS, list);
 
   return ok(`已${mode === 'replace' ? '覆盖' : '追加'}到项目「${p.name}」的记忆。`, {
     summary: `写项目记忆（${text.length} 字）`,
@@ -105,7 +105,7 @@ function projectDocRead(args, ctx) {
   });
 }
 
-function projectDocWrite(args, ctx) {
+async function projectDocWrite(args, ctx) {
   const p = currentProject(ctx);
   if (!p) return fail(NO_PROJECT);
 
@@ -127,7 +127,7 @@ function projectDocWrite(args, ctx) {
     docs.push({ id: `d-${now}-${Math.random().toString(36).slice(2, 8)}`, name, text, updatedAt: now });
   }
   list[i].docs = docs;
-  writeList(K_PROJECTS, list);
+  await writeList(K_PROJECTS, list);
 
   return ok(`已${j >= 0 ? '更新' : '新建'}文档《${name}》（${text.length} 字）。`, {
     summary: `${j >= 0 ? '更新' : '新建'}文档《${name}》`,
@@ -156,7 +156,7 @@ function skillList(_args) {
   );
 }
 
-function skillWrite(args) {
+async function skillWrite(args) {
   const name = slugify(args.name);
   const body = String(args.body || '').trim();
   if (!body) return fail('body 不能为空 —— 技能的正文就是要注入的那段指令');
@@ -178,7 +178,7 @@ function skillWrite(args) {
 
   if (i >= 0) list[i] = rec;
   else list.push(rec);
-  writeList(K_SKILLS, list);
+  await writeList(K_SKILLS, list);
 
   return ok(
     `已${i >= 0 ? '更新' : '创建'}技能 /${name}。用户在输入框里打 /${name} 就能唤起。`,

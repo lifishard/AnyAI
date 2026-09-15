@@ -1,1 +1,88 @@
-.native-ai-content{display:grid;gap:12px;margin-top:14px;min-width:0}.native-ai-content label{display:grid;gap:5px;font-size:12px;min-width:0}.native-ai-content textarea,.native-ai-content input,.native-ai-content select{box-sizing:border-box;width:100%;min-width:0;max-width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}.native-ai-content textarea{resize:vertical}.native-ai-content input[type=number]{width:85px}.native-worker{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px;border:1px solid var(--border);border-radius:8px}.native-worker details{grid-column:1/-1}.native-ai-content summary{cursor:pointer;font-size:12px;overflow-wrap:anywhere}.native-task{border-top:1px solid var(--border);padding-top:12px;min-width:0}.native-task pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:12px;line-height:1.7;max-height:380px;overflow:auto}.native-task details{margin:10px 0}.native-result{margin-top:12px;padding:10px;background:var(--bg);border-radius:8px}.native-progress{border-left:2px solid var(--accent);padding-left:8px}.native-ai-panel a{color:var(--accent)}@media(max-width:480px){.native-worker{grid-template-columns:1fr}}
+.native-ai-connection {
+  padding-top: 14px;
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.native-ai-connection.selected {
+  margin-inline: -8px;
+  padding-inline: 10px;
+  background: var(--bg-active);
+}
+
+.native-ai-connection .client-heading {
+  align-items: flex-start;
+  flex-wrap: nowrap;
+}
+
+.native-ai-connection .client-heading > div {
+  min-width: 0;
+}
+
+.native-ai-connection .client-heading p {
+  margin: 5px 0 0;
+}
+
+.connection-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  color: var(--fg-dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.connection-state > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+}
+
+.connection-state.ready {
+  color: var(--ok-fg, #15803d);
+}
+
+.connection-state.ready > span {
+  background: currentColor;
+}
+
+.connection-state.waiting {
+  color: var(--warn, #a16207);
+}
+
+.connection-state.waiting > span {
+  background: currentColor;
+}
+
+.connection-state.error {
+  color: var(--danger-fg, #b91c1c);
+}
+
+.connection-state.error > span {
+  background: currentColor;
+}
+
+.connection-detail,
+.quota-note,
+.connection-message,
+.connection-error {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.connection-detail,
+.quota-note {
+  color: var(--fg-faint);
+}
+
+.connection-message {
+  color: var(--fg-dim);
+}
+
+.connection-error {
+  color: var(--danger-fg, #b91c1c);
+}

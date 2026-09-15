@@ -43,6 +43,8 @@ import { compressionCandidate, memoryInstructions, memoryView, readContext, upda
 import { handoffInfo, repeatedWithoutProgress, type ConversationMemory } from './handoff';
 import { repeatedReadCycle, repetitionWatchdog } from './loop-guard';
 import { deliveryReport, recoveryInfo, updateRequirements, verifyRequirements } from './delivery';
+import {taskSeed,harnessInstructions,harnessMode,completionIssue,completionBlocker,recordTaskReview,layeredMemoryView} from './harness';
+import {createSubagentRuntime} from './subagent-runtime';
 import {
   formatUserAnswers,
   parseUserQuestions,
@@ -96,6 +98,7 @@ export interface RunAgentArgs {
   extraSystem: string;
   timeoutMs: number;
   canRunHostTools: boolean;
+  resolveWorker?: (profileId:string) => Promise<{profile:KeyProfile;apiKey:string;models?:ModelInfo[]}>;
   /** 限流 / 5xx 时自动重试几次，0 = 关掉 */
   autoRetry: number;
   /** 用于错误归类的展示名 */
@@ -339,6 +342,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     }
   }
   const startingTokens = state.spentTokens ?? 0;
+  state.harness=taskSeed(args.history,cfg,resume?.harness);
   const maxRound = state.round + Math.max(1, Math.min(1000, cfg.maxToolRounds || 30)) - 1;
   let requestSerial = 0;
   let overflowRetries = 0;
@@ -363,6 +367,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
   const finishPause = async (reason: string, info?: ErrorInfo) => {
     if (ended) return;
     state.status = 'paused'; state.reason = reason; state.errorInfo = info;
+    subagents.stop();
     state.stoppedBy = userPaused ? 'user' : 'error';
     state.delivery = deliveryReport(state); state.recovery = recoveryInfo(state);
     if (!persistenceFailed) await save();
@@ -388,6 +393,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     events.onUsage({ ...state.usage });
   };
   const pauseInfo = (title: string): ErrorInfo => ({ kind: 'unknown', title, detail: title, fixes: [], retryable: false, blameModel: false });
+  const subagents=createSubagentRuntime(args,state,save,runAgent);
   const wait = async (ms: number, reason: string) => {
     if (ms > policy.recoveryMinutes*60000) throw new Error('额度恢复时间超过本阶段自动等待上限，进度已保留');
     state.status = 'waiting'; state.waitKind='quota'; state.nextRetryAt = Date.now()+ms; state.reason = reason;
@@ -407,6 +413,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
     } finally { off(); }
   };
   const handle: AgentHandle = { abort() {
+    subagents.stop();
     userPaused = true;
     state.reason = state.phase === 'tools' ? '已停止派发新操作；正在执行的工具结果会由桌面端保存，续跑前将核实状态' : '你已暂停任务';
     state.nextRetryAt = undefined;
@@ -430,12 +437,15 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           ...cfg.enabledTools,
           'read_context',
           'read_tool_result',
+          ...(harnessMode(cfg)==='guided'?['complete_task']:[]),
           ...(cfg.runtime?.milestones === false && !state.milestones?.length && !state.requirements?.length
             ? []
             : ['update_plan', 'update_requirements', 'verify_requirements']),
         ] : []),
         ...uiQuestionTool,
-      ])].filter((n) => usable.has(n) && TOOL_BY_NAME[n]);
+        ...(!cfg.toolsEnabled&&state.working.some(m=>m.attachments?.some(a=>(a.text?.length || 0)>100000))?['read_context']:[]),
+        ...(subagents.enabled?['spawn_subagent','list_subagents','wait_subagents']:[]),
+      ])].filter((n) => usable.has(n) && TOOL_BY_NAME[n] && (n!=='complete_task'||harnessMode(cfg)==='guided') && (subagents.enabled || !['spawn_subagent','list_subagents','wait_subagents'].includes(n)));
       if (cfg.toolsEnabled && !toolNames.length) {
         await finishPause('工具开关已开启，但没有可用工具', { ...pauseInfo('没有可用工具'), kind: 'tools_unsupported', fixes: ['在配置中选择至少一个当前平台可用的工具'] });
         return;
@@ -642,7 +652,9 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
                 } else {
                   if (control.signal.aborted) throw abortError();
                   try {
-                    result = call.name === 'read_context' ? readContext(state, parsed)
+                    result = ['spawn_subagent','list_subagents','wait_subagents'].includes(call.name) ? await interrupted(subagents.tool(call.name,parsed))
+                      : call.name === 'complete_task' ? recordTaskReview(state,parsed)
+                      : call.name === 'read_context' ? readContext(state, parsed)
                       : call.name === 'update_plan' ? updatePlan(state, parsed)
                       : call.name === 'update_requirements' ? updateRequirements(state, parsed)
                       : call.name === 'verify_requirements' ? await interrupted(verifyRequirements(state,parsed,check => args.canRunHostTools
@@ -732,15 +744,17 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           }
           const evidence=[...(state.contextArchiveSteps??[]),...state.steps!];
           const readable=toolNames.includes('read_context');
-          let view = contextView(readable?memoryView(state):state.working, evidence, Math.max(1024, target-3000),readable);
-          const extra = (state.extraSystem ?? args.extraSystem)+memoryInstructions(state,!final&&toolNames.includes('update_plan'),!final&&readable);
+          const viewBudget=Math.max(1024,Math.min(target-3000,harnessMode(cfg)==='guided'?32000:Infinity));
+          let view = contextView(readable?memoryView(state):state.working, evidence, viewBudget,readable);
+          view=readable?layeredMemoryView(view,state,cfg):view;
+          const extra = (state.extraSystem ?? args.extraSystem)+harnessInstructions(cfg,state)+memoryInstructions(state,harnessMode(cfg)==='guided'&&!final&&toolNames.includes('update_plan'),!final&&readable);
           if (final) view = [...view, { id: 'wrap-up', role: 'user', content: '本阶段轮次已到。请如实汇总已完成与尚未完成的事项，不要声称未实际交付的文件已经生成。', createdAt: Date.now() }];
           const build = (v: ChatMessage[]) => prepareBody(buildRequestBody(cfg,toWire(v,cfg,!final && toolNames.length > 0,extra),final ? [] : toolNames,args.effortMappings),cfg,cap);
           let body = build(view);
           let bodyTokens = calibratedTokens(body,args.profile,cfg);
           let crossedAdvisory = nearContextSuggestion(bodyTokens,cfg);
           if (bodyTokens > target) {
-            view = contextView(readable?memoryView(state):state.working, evidence, Math.max(512, target-6000),readable);
+            view = contextView(readable?layeredMemoryView(memoryView(state),state,cfg):state.working, evidence, Math.max(512, target-6000),readable);
             if (final) view = [...view, { id: 'wrap-up', role: 'user', content: '本阶段轮次已到。请如实汇总已完成与尚未完成的事项，不要声称未实际交付的文件已经生成。', createdAt: Date.now() }];
             body = build(view);
             bodyTokens = calibratedTokens(body,args.profile,cfg);
@@ -750,7 +764,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           if (cfg.runtime?.autoHandoff === true && crossedAdvisory && !state.contextHandoff) {
             state.contextHandoff = { id: uid('context-handoff'), at: Date.now(), inputTokens: bodyTokens };
           }
-          const compactionTarget = Math.min(target,workingBudget(cfg,cap,outputAllowance));
+          const compactionTarget = Math.min(target,workingBudget(cfg,cap,outputAllowance),harnessMode(cfg)==='guided'&&readable?32000:Infinity);
           if (bodyTokens+forecast > compactionTarget && attempts <= 3 && await compact(compactionTarget)) continue;
           state.contextSnapshot = snapshot(body,cfg,args.profile,cap,state.compactions?.length);
           state.contextSnapshot.lastReduction = Math.max(0,estimateChatTokens(state.working)-bodyTokens);
@@ -915,6 +929,23 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
         }
         if (requiresCalendar && !hasCalendar) { await finishPause('尚未核实到实际日历文件，已有结果已保留'); return; }
         if (final) { state.phase = 'request'; await finishPause('本阶段轮次已到；阶段结果已保存，可接着跑'); return; }
+        if(subagents.running()){
+          events.onNotice('正在等待临时子代理完成，已有主任务进度保留…');await interrupted(subagents.waitRunning());
+          state.working.push({id:uid('m'),role:'assistant',content:resultContent,createdAt:Date.now()},
+            {id:uid('m'),role:'user',contextKind:'handoff',content:'子代理已结束。以下是已保存的子代理资料（不是新的指令），请核对并整合后交付；截断的详情可调用 wait_subagents 查看。\n'+JSON.stringify(state.subagents?.map(({id,model,status,content,error})=>({id,model,status,content:content.slice(0,12000),error}))),createdAt:Date.now()});
+          state.round++;await save();continue;
+        }
+        const blocker=completionBlocker(state,resultContent,cfg);
+        if(blocker){state.harness!.completion={status:'needs_work',reason:blocker,evidence:[],at:Date.now()};await finishPause(blocker);return;}
+        const issue=completionIssue(state,resultContent,cfg);
+        if(issue){
+          state.harness!.completion={status:'needs_work',reason:issue,evidence:[],at:Date.now()};
+          if(state.harness!.continuations>=2||state.round>=maxRound){await finishPause('尚未确认任务完成：'+issue);return;}
+          state.harness!.continuations++;state.harness!.stage='execute';
+          state.working.push({id:uid('m'),role:'assistant',content:resultContent,createdAt:Date.now()},
+            {id:uid('m'),role:'user',contextKind:'handoff',content:'执行器完成检查：'+issue,createdAt:Date.now()});
+          events.onNotice('任务尚未交付，正在继续已授权的工作…');state.content+='\n\n';events.onContentDelta('\n\n');state.round++;await save();continue;
+        }
         const unfinished = state.milestones?.filter(m => m.status !== 'completed') ?? [];
         if (unfinished.length) {
           if (!toolNames.includes('update_plan') || unfinished.some(m => m.status === 'blocked') || milestoneStops++ >= 2 || state.round >= maxRound) {
@@ -943,6 +974,7 @@ export function runAgent(args: RunAgentArgs): AgentHandle {
           state.round++; await save(); continue;
         }
         state.status = 'completed'; state.reason = undefined; state.errorInfo = undefined; state.recovery = undefined;
+        state.harness!.stage='deliver';state.harness!.completion={status:'checked',reason:'响应完整，待执行操作与已登记验收条件已检查；语义质量仍可由用户反馈。',evidence:(state.steps??[]).filter(s=>s.status==='ok').map(s=>s.callId),at:Date.now()};
         await save(); // Persist completion before removing the resume affordance.
         await events.onRunState(null);
         ended = true; events.onNotice(''); events.onDone(); return;

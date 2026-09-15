@@ -58,6 +58,11 @@ export default function ObservationPanel({onClose,onOpenTask}:{onClose:()=>void;
       <p>{Object.entries(summary.stateCounts).map(([k,n])=>`${statusLabel[k]??'未知'} ${n}`).join(' · ')||'新任务运行后会逐步记录；没有记录不代表没有使用过。'}</p>
       <p>已列验收条件全部通过 {summary.accepted} 个；未建清单或含未检查条件 {summary.unchecked} 个；含未通过条件 {summary.failedAcceptance} 个；含无法核验条件 {summary.unverifiable} 个。后三类可重叠。</p>
       <p>当前阶段的用户反馈 {summary.feedback}/{summary.total} 个任务：可用 {summary.usable}、部分可用 {summary.partial}、未解决 {summary.unresolved}。未反馈结果未知。{summary.historicalFeedback?`另有 ${summary.historicalFeedback} 个任务只保留较早阶段的反馈。`:''}</p>
+      <details><summary>运行改进依据</summary>
+        <p>结束状态不等于任务质量。当前范围中，{tasks.filter(t=>t.status==='completed'&&t.acceptance.total===0).length} 个已结束任务没有验收清单；{tasks.filter(t=>t.harness).length} 个任务有新版执行检查记录。</p>
+        <p>提前结束检查触发续跑 {tasks.reduce((n,t)=>n+(t.harness?.continuations||0),0)} 次；临时子代理返回 {tasks.reduce((n,t)=>n+(t.harness?.subagentsCompleted||0),0)}/{tasks.reduce((n,t)=>n+(t.harness?.subagents||0),0)} 个。旧记录缺少这些字段，不能当成零失败。</p>
+        <p>改进流程：选取未解决或遗漏的任务，导出脱敏排查包，提出具体修复，再用相同任务核对正确性、耗时和用量。通过回归检查后才更新执行规则；用户反馈与模型自查分别统计，不自动改写项目规范。</p>
+      </details>
     </div>
     <div className="observation-task-list">{tasks.slice().reverse().map(t=><article key={t.id} className={selected===t.id?'selected':''}>
       <div><strong>{runTitle(t.recordId)??'已保存的任务'}</strong><small> · {new Date(t.startedAt).toLocaleString()}</small><p>{statusLabel[t.status]??'未知'} · {acceptanceLabel(t)} · {t.feedback?(isCurrentFeedback(t)?'':'较早阶段反馈：')+outcomeLabel[t.feedback.outcome]:'未反馈'}</p>

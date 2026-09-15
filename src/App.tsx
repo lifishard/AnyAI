@@ -22,7 +22,7 @@ import { validateUserAnswers, type UserQuestionAnswers } from './lib/user-questi
 import { SEED_MODELS, buildHeaders, endpoint, fetchModels, previewBody } from './lib/api';
 import { PROBE_SPACING_MS, probe400, probeHistory, type ProbeStep } from './lib/probe400';
 import { formatExchange, failedExchange, exchangeOf, importExchanges } from './lib/wiretap';
-import { loadRuns, saveRun, recoverConversations, forgetRuns, runRecord } from './lib/runs';
+import { loadRuns, saveRun, recoverConversations, forgetRuns, runRecord,conversationsForStorage } from './lib/runs';
 import { localProgress } from './lib/task-context';
 import { conversationMemory, createContextHandoff, withHandoffArchive } from './lib/handoff';
 import { capabilities, outputReserve, quotaKey, routeKey, workingBudget } from './lib/adaptive';
@@ -45,7 +45,7 @@ import {
   loadSettings,
   newConversation,
   saveConversationsDebounced,
-  saveConversationsNow,
+  saveConversationsNow as saveConversationsRaw,
   saveSettings,
   secretGet,
   titleFrom,
@@ -68,6 +68,8 @@ import {
   type ScheduledTask,
 } from './lib/schedule';
 import AnswerBlock from './components/AnswerBlock';
+import ConversationControls from './components/ConversationControls';
+import {validateAttachmentSize,validateAttachmentBatch} from './lib/attachment-limits';
 import ActivityPanel, { hasActivity } from './components/ActivityPanel';
 import SelectionActions from './components/SelectionActions';
 import Composer from './components/Composer';
@@ -94,6 +96,7 @@ const EXAMPLES = [
 
 interface QueuedInput { toolsEnabled?:boolean; text: string; attachments: Attachment[]; quotes: MessageQuote[]; quoteOnly: boolean; conversationId: string | null }
 
+const saveConversationsNow=(list:Conversation[])=>saveConversationsRaw(conversationsForStorage(list));
 export default function App() {
   const [bootError, setBootError] = React.useState<string | null>(null);
   const [bootReady, setBootReady] = React.useState(false);
@@ -230,7 +233,7 @@ export default function App() {
   }, [settings, bootReady]);
 
   React.useEffect(() => {
-    if (bootReady) saveConversationsDebounced(conversations, reportSaveError);
+    if (bootReady) saveConversationsDebounced(conversationsForStorage(conversations), reportSaveError);
   }, [conversations, bootReady]);
 
   React.useEffect(() => {
@@ -475,6 +478,8 @@ export default function App() {
   }
 
   function addPastedImage(dataUrl: string, name: string, mime: string, size: number) {
+    const error=validateAttachmentSize('image',size,name)||validateAttachmentBatch(attachments.reduce((n,a)=>n+a.size,0)+size);
+    if(error){toast.show(error,5000);return;}
     setAttachments((prev) => [
       ...prev,
       { id: uid('a'), kind: 'image', name, mime, size, dataUrl },
@@ -546,7 +551,9 @@ export default function App() {
         path: f.path,
       });
     }
-    if (added.length) setAttachments((prev) => [...prev, ...added]);
+    const batchError=validateAttachmentBatch([...attachments,...added].reduce((n,a)=>n+a.size,0));
+    if(batchError)errors.unshift(batchError);
+    else if (added.length) setAttachments((prev) => [...prev, ...added]);
     if (errors.length) toast.show(errors[0], 4000);
   }
 
@@ -955,14 +962,28 @@ export default function App() {
         const reasoning = buf.reasoning;
         patchMessage(convId, answerMsg.id, { content, reasoning });
       };
-      const timer = setInterval(flush, 60);
+      const timer = setInterval(flush, 120);
 
       const steps: ToolStep[] = [...(answerMsg.steps ?? [])];
       let latestState: RunState | null = resumeFrom ?? null;
       const started = Date.now();
       const requestId = uid('r');
+      let approvalChain=Promise.resolve();
+      let approvalsClosed=false;
+      const pendingApprovals=new Set<(ok:boolean)=>void>();
+      const requestApproval=(step:ToolStep):Promise<boolean>=>{
+        const result=approvalChain.then(()=>new Promise<boolean>(resolve=>{
+          if(approvalsClosed){resolve(false);return;}
+          const finish=(ok:boolean)=>{pendingApprovals.delete(finish);resolve(ok);};
+          pendingApprovals.add(finish);setConfirmReq({step,resolve:finish});
+        }));
+        approvalChain=result.then(()=>{});return result;
+      };
 
       const finishUi = () => {
+        approvalsClosed=true;
+        for(const resolve of pendingApprovals)resolve(false);
+        setConfirmReq(null);
         clearInterval(timer); flush();
         if (runningRef.current?.requestId === requestId) { runningRef.current = null; setBusy(null); }
         startingRef.current = false;
@@ -972,6 +993,12 @@ export default function App() {
         profile,
         apiKey,
         config: cfg,
+        resolveWorker: async profileId => {
+          const workerProfile=settings.keyProfiles.find(p=>p.id===profileId);
+          if(!workerProfile)throw new Error('子代理所选凭据已不存在，请重新选择。');
+          const workerKey=await getTransport().secretGet(profileId);
+          return {profile:structuredClone(workerProfile),apiKey:workerKey || '',models:[...(settings.cachedModels[profileId] || []),...(settings.customModels[profileId] || [])]};
+        },
         history,
         autoRetry: settings.autoRetry ?? 2,
         profileName: profile.name,
@@ -1016,7 +1043,7 @@ export default function App() {
           const alwaysAsk =
             step.name === 'request_access' || (step.name === 'run_command' && Boolean(args.elevated));
           if (alwaysAsk) {
-            return new Promise<boolean>((resolve) => setConfirmReq({ step, resolve }));
+            return requestApproval(step);
           }
           if (cfg.approvalMode === 'all') return Promise.resolve(true);
           if (cfg.approvalMode === 'auto') {
@@ -1026,7 +1053,7 @@ export default function App() {
             const heavy = step.name === 'native_client_operation' || def?.group === 'shell' || def?.group === 'agent';
             if (!heavy) return Promise.resolve(true);
           }
-          return new Promise<boolean>((resolve) => setConfirmReq({ step, resolve }));
+          return requestApproval(step);
         },
         events: {
           onContentReplace(content, reasoning) {
@@ -1067,7 +1094,7 @@ export default function App() {
                 title: nextConv.title, state });
             }
             patchMessage(convId, answerMsg.id, { runState: state ?? undefined,
-              ...(state ? { milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery, taskId:state.runId, supplementalInputs:state.supplementalInputs, handoff:state.handoff, userQuestionHistory: state.userQuestionHistory } : {}) });
+              ...(state ? { harness:state.harness,subagents:state.subagents,milestones: state.milestones, contextSnapshot: state.contextSnapshot, delivery: state.delivery, taskId:state.runId, supplementalInputs:state.supplementalInputs, handoff:state.handoff, userQuestionHistory: state.userQuestionHistory } : {}) });
           },
           onPaused(reason) {
             finishUi(); setQueuePaused(true);
@@ -1377,6 +1404,7 @@ export default function App() {
 
   const composer = (
     <Composer
+      controls={<ConversationControls config={config} profiles={settings.keyProfiles} modelsByProfile={Object.fromEntries(settings.keyProfiles.map(p=>[p.id,[...(settings.cachedModels[p.id]||[]),...(settings.customModels[p.id]||[])]]))} onChange={setConfig}/>}
       key={active?.id ?? 'new'}
       initialDraft={active?.draft}
       onDraftChange={text => { if (active) updateConv(active.id, c => c.draft === text ? c : { ...c, draft: text }); }}

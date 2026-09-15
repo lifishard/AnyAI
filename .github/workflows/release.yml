@@ -70,7 +70,10 @@ jobs:
   publish:
     name: 验证并发布三平台安装包
     needs: build
-    if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
+    # A manual run is a build check only. Publication must come from the
+    # version tag pushed by the release BAT, so it cannot publish stale branch
+    # sources or a source tree that was never tagged.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

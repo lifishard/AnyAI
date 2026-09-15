@@ -24,7 +24,8 @@ import { desktopInstallTarget, launchDesktopInstall } from './desktop-install.mj
 const root = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..');
 const isWin = process.platform === 'win32';
 const options = new Set(process.argv.slice(2));
-const installAfterBuild = isWin && options.has('--install') && !options.has('--no-install');
+const checkOnly = options.has('--check-only');
+const installAfterBuild = isWin && options.has('--install') && !options.has('--no-install') && !checkOnly;
 const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('打包版本格式无效');
 const outputDir = `release/${version}`;
@@ -36,9 +37,13 @@ const rule = () => line('='.repeat(56));
 /** 边打印边收集输出 —— 长步骤要让人看到进度，出错了又得能回头分析原因 */
 function runTee(cmd, args) {
   return new Promise((resolve) => {
+    // npm/npx are Windows command shims and need a shell, while
+    // process.execPath may live under "Program Files" and must be launched
+    // directly so the path is not split at its first space.
+    const shell = isWin && !path.isAbsolute(cmd);
     const child = spawn(cmd, args, {
       cwd: root,
-      shell: isWin, // Windows 上 npm / npx 是 .cmd 垫片，不走 shell 起不来
+      shell,
       env: { ...process.env, FORCE_COLOR: '0' },
     });
     let out = '';
@@ -58,9 +63,10 @@ function runTee(cmd, args) {
 }
 
 function runQuiet(cmd, args) {
+  const shell = isWin && !path.isAbsolute(cmd);
   const r = spawnSync(cmd, args, {
     cwd: root,
-    shell: isWin,
+    shell,
     encoding: 'utf8',
     env: { ...process.env, FORCE_COLOR: '0' },
   });
@@ -93,7 +99,12 @@ line();
 /* ---------------- 1. 依赖 ---------------- */
 
 if (!fs.existsSync(path.join(root, 'node_modules'))) {
-  line('[1/4] 安装依赖，第一次会慢一点…');
+  if (checkOnly) {
+    line('[1/5] 检查模式需要现有依赖；未执行安装。');
+    line('      请先运行 npm install，再重试 --check-only。');
+    process.exit(1);
+  }
+  line('[1/5] 安装依赖，第一次会慢一点…');
   line();
   const r = await runTee('npm', ['install']);
   if (!r.ok) {
@@ -102,13 +113,26 @@ if (!fs.existsSync(path.join(root, 'node_modules'))) {
     process.exit(1);
   }
 } else {
-  line('[1/4] 依赖已经装过，跳过。');
+  line('[1/5] 依赖已经装过，跳过。');
 }
 line();
 
-/* ---------------- 2. 类型检查 ---------------- */
+/* ---------------- 2. 回归测试与类型检查 ---------------- */
 
-line('[2/4] 类型检查…');
+line('[2/5] 回归测试…');
+const testFiles = fs
+  .readdirSync(path.join(root, 'tests'))
+  .filter((name) => name.endsWith('.test.cjs'))
+  .map((name) => path.join('tests', name));
+const tests = await runTee(process.execPath, ['--test', ...testFiles]);
+if (!tests.ok) {
+  line();
+  line('✗ 回归测试未通过，停止打包；现有安装包保留。');
+  process.exit(1);
+}
+line();
+
+line('[3/5] 类型检查…');
 const tc = runQuiet('npx', ['tsc', '--noEmit']);
 if (tc.ok) {
   line('      通过。');
@@ -125,9 +149,16 @@ if (tc.ok) {
 }
 line();
 
+if (checkOnly) {
+  rule();
+  line('  检查完成：未打包、未安装、未构建产物、未打开产物，也未清理旧版本。');
+  rule();
+  process.exit(0);
+}
+
 /* ---------------- 3. 前端构建 ---------------- */
 
-line('[3/4] 构建前端…');
+line('[4/5] 构建前端…');
 line();
 const vb = await runTee('npx', ['vite', 'build']);
 if (!vb.ok) {
@@ -188,7 +219,7 @@ if (running.length) {
   }
 }
 
-line('[4/4] 打安装包，大概 1–3 分钟…');
+line('[5/5] 打安装包，大概 1–3 分钟…');
 line();
 
 let installerOk = true;
